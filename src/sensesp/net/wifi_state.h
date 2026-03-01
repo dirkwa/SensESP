@@ -1,19 +1,8 @@
 #ifndef SENSESP_NET_WIFI_STATE_H_
 #define SENSESP_NET_WIFI_STATE_H_
 
-namespace sensesp {
-
-enum class WiFiState {
-  kWifiNoAP = 0,
-  kWifiDisconnected,
-  kWifiConnectedToAP,
-  kWifiManagerActivated,
-  kWifiAPModeActivated
-};
-
-// alias WiFiState for backward compatibility
-using WifiState = WiFiState;
-
-}  // namespace sensesp
+// This header is kept for backward compatibility.
+// New code should include "sensesp/net/network_state.h" instead.
+#include "sensesp/net/network_state.h"
 
 #endif  // SENSESP_NET_WIFI_STATE_H_
