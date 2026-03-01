@@ -3,6 +3,8 @@
 
 #include "sensesp/controllers/system_status_controller.h"
 #include "sensesp/net/discovery.h"
+#include "sensesp/net/ethernet_provisioner.h"
+#include "sensesp/system/device_id.h"
 #include "sensesp/net/http_server.h"
 #include "sensesp/net/networking.h"
 #include "sensesp/net/ota.h"
@@ -132,6 +134,10 @@ class SensESPApp : public SensESPBaseApp {
     button_gpio_pin_ = pin;
     return this;
   }
+  void set_ethernet_config(const EthernetConfig& config) {
+    ethernet_config_ = config;
+    ethernet_enabled_ = true;
+  }
 
   /**
    * @brief Perform initialization of SensESPApp once builder configuration is
@@ -152,6 +158,12 @@ class SensESPApp : public SensESPBaseApp {
                                                ap_password_);
 
     ConfigItem(networking_);
+
+    // create Ethernet provisioner if configured
+    if (ethernet_enabled_) {
+      ethernet_provisioner_ =
+          std::make_shared<EthernetProvisioner>(ethernet_config_);
+    }
 
     if (ota_password_ != nullptr) {
       // create the OTA object
@@ -184,8 +196,8 @@ class SensESPApp : public SensESPBaseApp {
     ConfigItem(this->ws_client_);
 
     // connect the system status controller
-    this->networking_->get_wifi_state_producer()->connect_to(
-        &system_status_controller_->get_wifi_state_consumer());
+    this->networking_->get_network_state_producer()->connect_to(
+        &system_status_controller_->get_network_state_consumer());
     this->ws_client_->connect_to(
         &system_status_controller_->get_ws_connection_state_consumer());
 
@@ -221,10 +233,21 @@ class SensESPApp : public SensESPBaseApp {
   void connect_status_page_items() {
     this->hostname_->connect_to(&this->hostname_ui_output_);
     this->event_loop_->onRepeat(4999, [this]() {
-      wifi_ssid_ui_output_.set(WiFi.SSID());
-      mac_address_ui_output_.set(WiFi.macAddress());
+      // Network info — transport-agnostic (prefer Ethernet IP if available)
+      ip_address_ui_output_.set(
+          ETH.hasIP() ? ETH.localIP().toString()
+                      : WiFi.localIP().toString());
+      mac_address_ui_output_.set(get_device_id());
       free_memory_ui_output_.set(ESP.getFreeHeap());
-      wifi_rssi_ui_output_.set(WiFi.RSSI());
+
+      // WiFi-specific info — only when WiFi is connected
+      if (WiFi.isConnected()) {
+        wifi_ssid_ui_output_.set(WiFi.SSID());
+        wifi_rssi_ui_output_.set(WiFi.RSSI());
+      } else {
+        wifi_ssid_ui_output_.set(ethernet_enabled_ ? "(Ethernet)" : "(disconnected)");
+        wifi_rssi_ui_output_.set(0);
+      }
 
       // Uptime
       uptime_ui_output_.set(millis() / 1000);
@@ -313,6 +336,9 @@ class SensESPApp : public SensESPBaseApp {
   std::shared_ptr<ButtonHandler> button_handler_;
 
   std::shared_ptr<Networking> networking_;
+  bool ethernet_enabled_ = false;
+  EthernetConfig ethernet_config_;
+  std::shared_ptr<EthernetProvisioner> ethernet_provisioner_;
 
   std::shared_ptr<OTA> ota_;
   std::shared_ptr<SKDeltaQueue> sk_delta_queue_;
@@ -323,11 +349,12 @@ class SensESPApp : public SensESPBaseApp {
   StatusPageItem<int> uptime_ui_output_{"Uptime (s)", 0, "System", 1100};
 
   StatusPageItem<String> hostname_ui_output_{"Hostname", "", "Network", 1200};
-  StatusPageItem<String> mac_address_ui_output_{"MAC Address", "", "Network",
+  StatusPageItem<String> mac_address_ui_output_{"Device ID (MAC)", "", "Network",
                                                  1300};
-  StatusPageItem<String> wifi_ssid_ui_output_{"SSID", "", "Network", 1400};
-
-  StatusPageItem<int8_t> wifi_rssi_ui_output_{"WiFi signal strength (dB)", -128,
+  StatusPageItem<String> ip_address_ui_output_{"IP address", "", "Network",
+                                                1350};
+  StatusPageItem<String> wifi_ssid_ui_output_{"WiFi SSID", "", "Network", 1400};
+  StatusPageItem<int8_t> wifi_rssi_ui_output_{"WiFi signal (dB)", -128,
                                               "Network", 1500};
 
   StatusPageItem<String> sk_server_address_ui_output_{"Signal K server address",

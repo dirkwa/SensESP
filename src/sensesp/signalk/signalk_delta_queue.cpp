@@ -4,6 +4,7 @@
 
 #include "Arduino.h"
 #include "ArduinoJson.h"
+#include "sensesp/system/device_id.h"
 #include "sensesp_app.h"
 #include "signalk_emitter.h"
 
@@ -72,6 +73,8 @@ void SKDeltaQueue::get_delta(String& output) {
   JsonObject current = updates.add<JsonObject>();
   JsonObject source = current["source"].to<JsonObject>();
   source["label"] = SensESPBaseApp::get_hostname();
+  source["type"] = "SensESP";
+  source["src"] = get_device_id();
   JsonArray values = current["values"].to<JsonArray>();
 
   take_semaphore();

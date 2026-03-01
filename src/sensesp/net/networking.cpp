@@ -28,11 +28,12 @@ Networking::Networking(const String& config_path, const String& client_ssid,
                        const String& client_password, const String& ap_ssid,
                        const String& ap_password)
     : FileSystemSaveable{config_path}, Resettable(0) {
-  // Get the WiFi state producer singleton and make it update this object output
-  wifi_state_emitter_ = std::make_shared<LambdaConsumer<WiFiState>>(
-          [this](WiFiState state) { this->emit(state); });
+  // Connect the network state producer to forward state changes through
+  // this object's ValueProducer output.
+  network_state_emitter_ = std::make_shared<LambdaConsumer<NetworkState>>(
+          [this](NetworkState state) { this->emit(state); });
 
-  wifi_state_producer_->connect_to(wifi_state_emitter_);
+  network_state_producer_->connect_to(network_state_emitter_);
 
   bool config_loaded = load();
 

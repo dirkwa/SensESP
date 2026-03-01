@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "Arduino.h"
+#include "sensesp/net/ethernet_provisioner.h"
 #include "sensesp/sensors/system_info.h"
 #include "sensesp/system/valueproducer.h"
 #include "sensesp/transforms/debounce.h"
@@ -25,6 +26,8 @@ class SensESPAppBuilder : public SensESPBaseAppBuilder {
   String password_ = "";
   String sk_server_address_ = "";
   uint16_t sk_server_port_ = 0;
+  bool ethernet_enabled_ = false;
+  EthernetConfig ethernet_config_;
 
  protected:
   std::shared_ptr<SensESPApp> app_;
@@ -74,6 +77,27 @@ class SensESPAppBuilder : public SensESPBaseAppBuilder {
                                            const String& password) {
     app_->set_ap_ssid(ssid);
     app_->set_ap_password(password);
+    return this;
+  }
+
+  /**
+   * @brief Configure Ethernet with the specified pin/PHY configuration.
+   *
+   * The Ethernet interface will be initialized during app setup. The
+   * NetworkStateProducer automatically detects when Ethernet obtains
+   * an IP address and triggers Signal K connection.
+   *
+   * Can be combined with set_wifi_access_point() for WiFi AP provisioning
+   * + Ethernet data transport, or used standalone for pure wired operation.
+   *
+   * @param config Ethernet PHY and pin configuration. Use board presets
+   *               (e.g. EthernetConfig::olimex_esp32_poe_iso()) or provide
+   *               custom pin mappings.
+   * @return SensESPAppBuilder*
+   */
+  SensESPAppBuilder* set_ethernet(const EthernetConfig& config) {
+    ethernet_config_ = config;
+    ethernet_enabled_ = true;
     return this;
   }
 
@@ -264,17 +288,21 @@ class SensESPAppBuilder : public SensESPBaseAppBuilder {
   }
 
   const SensESPAppBuilder* enable_wifi_watchdog() {
-    // create the wifi disconnect watchdog
+    return enable_network_watchdog();
+  }
+
+  const SensESPAppBuilder* enable_network_watchdog() {
+    // Restart the device if no network connectivity for too long.
     app_->system_status_controller_
         ->connect_to(new Debounce<SystemStatus>(
             3 * 60 * 1000  // 180 s = 180000 ms = 3 minutes
             ))
         ->connect_to(new LambdaConsumer<SystemStatus>([](SystemStatus input) {
           ESP_LOGD(__FILENAME__, "Got system status: %d", (int)input);
-          if (input == SystemStatus::kWifiDisconnected ||
-              input == SystemStatus::kWifiNoAP) {
+          if (input == SystemStatus::kNetworkDisconnected ||
+              input == SystemStatus::kNoNetwork) {
             ESP_LOGW(__FILENAME__,
-                     "Unable to connect to wifi for too long; restarting.");
+                     "Unable to connect to network for too long; restarting.");
             event_loop()->onDelay(1000, []() { ESP.restart(); });
           }
         }));
@@ -291,6 +319,9 @@ class SensESPAppBuilder : public SensESPBaseAppBuilder {
    */
   std::shared_ptr<SensESPApp> get_app() {
     app_ = SensESPApp::get();
+    if (ethernet_enabled_) {
+      app_->set_ethernet_config(ethernet_config_);
+    }
     app_->setup();
     return app_;
   }
