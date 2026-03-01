@@ -37,12 +37,12 @@ class NetworkStateProducer : public ValueProducer<NetworkState> {
   void operator=(const NetworkStateProducer&) = delete;
 
  protected:
-  network_event_id_t sta_got_ip_id_;
-  network_event_id_t sta_disconnected_id_;
-  network_event_id_t ap_start_id_;
-  network_event_id_t ap_stop_id_;
-  network_event_id_t eth_got_ip_id_;
-  network_event_id_t eth_disconnected_id_;
+  network_event_handle_t sta_got_ip_id_;
+  network_event_handle_t sta_disconnected_id_;
+  network_event_handle_t ap_start_id_;
+  network_event_handle_t ap_stop_id_;
+  network_event_handle_t eth_got_ip_id_;
+  network_event_handle_t eth_disconnected_id_;
 
   void setup_callbacks() {
     // WiFi STA events

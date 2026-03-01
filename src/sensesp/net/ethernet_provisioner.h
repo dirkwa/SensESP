@@ -31,10 +31,10 @@ struct EthernetConfig {
 
   // Board presets
   static EthernetConfig olimex_esp32_poe_iso() {
-    return {ETH_PHY_LAN8710, 0, 23, 18, 12, ETH_CLOCK_GPIO17_OUT};
+    return {ETH_PHY_LAN8720, 0, 23, 18, 12, ETH_CLOCK_GPIO17_OUT};
   }
   static EthernetConfig olimex_esp32_gateway() {
-    return {ETH_PHY_LAN8710, 0, 23, 18, 5, ETH_CLOCK_GPIO17_OUT};
+    return {ETH_PHY_LAN8720, 0, 23, 18, 5, ETH_CLOCK_GPIO17_OUT};
   }
   static EthernetConfig wesp32() {
     return {ETH_PHY_LAN8720, 0, 16, 17, -1, ETH_CLOCK_GPIO0_IN};
