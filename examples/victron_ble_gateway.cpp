@@ -202,10 +202,9 @@ void setup() {
 
   SensESPAppBuilder builder;
   auto sensesp_app = builder.set_hostname("victron-ble-gw")
-                         // Board preset — change for your hardware
-                         .set_ethernet(EthernetConfig::olimex_esp32_poe_iso())
-                         .enable_ota("thisismyota")
-                         .get_app();
+                         ->set_ethernet(EthernetConfig::olimex_esp32_poe_iso())
+                         ->enable_ota("thisismyota")
+                         ->get_app();
 
   // Initialize NimBLE scanner (observer role only)
   NimBLEDevice::init("");
