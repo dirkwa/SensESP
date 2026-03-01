@@ -42,7 +42,7 @@ namespace sensesp {
  */
 class [[deprecated("Use RepeatSensor and Arduino analogReadMilliVolts() instead")]] AnalogInput : public FloatSensor {
  public:
-  AnalogInput(uint8_t pin = A0, unsigned int read_delay = 200,
+  AnalogInput(uint8_t pin = 0, unsigned int read_delay = 200,
               const String& config_path = "", float output_scale = 1024.);
 
   virtual bool to_json(JsonObject& root) override;
