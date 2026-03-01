@@ -1,7 +1,7 @@
 #ifndef _SYSTEM_STATUS_CONTROLLER_H_
 #define _SYSTEM_STATUS_CONTROLLER_H_
 
-#include "sensesp/net/networking.h"
+#include "sensesp/net/network_state.h"
 #include "sensesp/signalk/signalk_ws_client.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp/system/valueproducer.h"
@@ -9,28 +9,39 @@
 namespace sensesp {
 
 enum class SystemStatus {
-  kWifiNoAP = 100,
-  kWifiDisconnected,
-  kWifiManagerActivated,
+  // Transport-agnostic names
+  kNoNetwork = 100,
+  kNetworkDisconnected,
+  kNetworkAPMode,
   kSKWSDisconnected,
   kSKWSAuthorizing,
   kSKWSConnecting,
-  kSKWSConnected
+  kSKWSConnected,
+
+  // Backward-compatible aliases
+  kWifiNoAP = kNoNetwork,
+  kWifiDisconnected = kNetworkDisconnected,
+  kWifiManagerActivated = kNetworkAPMode,
 };
 
 /**
- * @brief Base class for a controller that can react to system status events
+ * @brief Base class for a controller that can react to system status events.
  *
- * Classes inheriting from SystemStatusController should override the
- * set_wifi_* and set_ws_* methods to take the relevant action when such
- * an event occurs.
+ * Consumes NetworkState (from any provisioner) and SKWSConnectionState
+ * to produce a unified SystemStatus that drives LED indicators and
+ * system monitoring.
  */
 class SystemStatusController : public ValueProducer<SystemStatus> {
  public:
   SystemStatusController() {}
 
-  ValueConsumer<WiFiState>& get_wifi_state_consumer() {
-    return wifi_state_consumer_;
+  ValueConsumer<NetworkState>& get_network_state_consumer() {
+    return network_state_consumer_;
+  }
+
+  // Backward compatibility alias
+  ValueConsumer<NetworkState>& get_wifi_state_consumer() {
+    return get_network_state_consumer();
   }
 
   ValueConsumer<SKWSConnectionState>& get_ws_connection_state_consumer() {
@@ -38,20 +49,19 @@ class SystemStatusController : public ValueProducer<SystemStatus> {
   }
 
  protected:
-  void set_wifi_state(const WiFiState& new_value) {
+  void set_network_state(const NetworkState& new_value) {
     switch (new_value) {
-      case WiFiState::kWifiNoAP:
-        this->update_state(SystemStatus::kWifiNoAP);
+      case NetworkState::kNoInterface:
+        this->update_state(SystemStatus::kNoNetwork);
         break;
-      case WiFiState::kWifiDisconnected:
-        this->update_state(SystemStatus::kWifiDisconnected);
+      case NetworkState::kDisconnected:
+        this->update_state(SystemStatus::kNetworkDisconnected);
         break;
-      case WiFiState::kWifiConnectedToAP:
-      case WiFiState::kWifiAPModeActivated:
+      case NetworkState::kConnected:
         this->update_state(SystemStatus::kSKWSDisconnected);
         break;
-      case WiFiState::kWifiManagerActivated:
-        this->update_state(SystemStatus::kWifiManagerActivated);
+      case NetworkState::kAPModeActivated:
+        this->update_state(SystemStatus::kNetworkAPMode);
         break;
     }
   }
@@ -59,10 +69,10 @@ class SystemStatusController : public ValueProducer<SystemStatus> {
   void set_sk_ws_connection_state(const SKWSConnectionState& new_value) {
     switch (new_value) {
       case SKWSConnectionState::kSKWSDisconnected:
-        if (current_state_ != SystemStatus::kWifiDisconnected &&
-            current_state_ != SystemStatus::kWifiNoAP &&
-            current_state_ != SystemStatus::kWifiManagerActivated) {
-          // Wifi disconnection states override the higher level protocol state
+        if (current_state_ != SystemStatus::kNetworkDisconnected &&
+            current_state_ != SystemStatus::kNoNetwork &&
+            current_state_ != SystemStatus::kNetworkAPMode) {
+          // Network disconnection states override the higher level protocol
           this->update_state(SystemStatus::kSKWSDisconnected);
         }
         break;
@@ -78,8 +88,10 @@ class SystemStatusController : public ValueProducer<SystemStatus> {
     }
   }
 
-  LambdaConsumer<WiFiState> wifi_state_consumer_{
-      [this](const WiFiState& new_value) { this->set_wifi_state(new_value); }};
+  LambdaConsumer<NetworkState> network_state_consumer_{
+      [this](const NetworkState& new_value) {
+        this->set_network_state(new_value);
+      }};
   LambdaConsumer<SKWSConnectionState> ws_connection_state_consumer_{
       [this](const SKWSConnectionState& new_value) {
         this->set_sk_ws_connection_state(new_value);
@@ -91,7 +103,7 @@ class SystemStatusController : public ValueProducer<SystemStatus> {
   }
 
  private:
-  SystemStatus current_state_ = SystemStatus::kWifiNoAP;
+  SystemStatus current_state_ = SystemStatus::kNoNetwork;
 };
 
 }  // namespace sensesp

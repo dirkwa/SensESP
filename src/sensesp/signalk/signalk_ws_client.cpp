@@ -4,6 +4,7 @@
 
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
+#include <Network.h>
 #include <esp_http_client.h>
 
 #ifdef SENSESP_SSL_SUPPORT
@@ -15,9 +16,11 @@
 #include "Arduino.h"
 #include "elapsedMillis.h"
 #include "esp_arduino_version.h"
+#include "sensesp/sensesp_version.h"
 #include "sensesp/signalk/signalk_listener.h"
 #include "sensesp/signalk/signalk_put_request.h"
 #include "sensesp/signalk/signalk_put_request_listener.h"
+#include "sensesp/system/device_id.h"
 #include "sensesp/system/uuid.h"
 #include "sensesp_app.h"
 
@@ -540,11 +543,11 @@ void SKWSClient::connect() {
     return;
   }
 
-  if (!WiFi.isConnected() && WiFi.getMode() != WIFI_MODE_AP) {
+  if (!Network.isOnline()) {
     ESP_LOGI(
         __FILENAME__,
-        "WiFi is disconnected. SignalK client connection will be initiated "
-        "when WiFi is connected.");
+        "Network is offline. Signal K client connection will be initiated "
+        "when network connectivity is available.");
     return;
   }
 
@@ -713,6 +716,8 @@ void SKWSClient::send_access_request(const String server_address,
   doc["description"] =
       String("SensESP device: ") + SensESPBaseApp::get_hostname();
   doc["permissions"] = kRequestPermission;
+  doc["deviceId"] = get_device_id();
+  doc["firmwareVersion"] = String("SensESP ") + kSensESPVersion;
   String json_req = "";
   serializeJson(doc, json_req);
 

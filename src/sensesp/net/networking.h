@@ -5,7 +5,8 @@
 #include <DNSServer.h>
 #include <WiFi.h>
 
-#include "sensesp/net/wifi_state.h"
+#include "sensesp/net/network_state.h"
+#include "sensesp/net/network_state_producer.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp/system/observablevalue.h"
 #include "sensesp/system/resettable.h"
@@ -16,96 +17,6 @@
 namespace sensesp {
 
 constexpr int kMaxNumClientConfigs = 3;
-
-/**
- * @brief Provide information about the current WiFi state.
- *
- * WiFiStateProducer reads the current network state using
- * Arduino Core callbacks. It is a replacement for the Networking class
- * ValueProducer output and effectively decouples the Networkig class
- * from the rest of the system. This allows for replacing the Networking
- * class with a different implementation.
- */
-class WiFiStateProducer : public ValueProducer<WiFiState> {
- public:
-  WiFiStateProducer() {
-    this->output_ = WiFiState::kWifiNoAP;
-
-    setup_wifi_callbacks();
-
-    // Emit the current state as soon as the event loop starts
-    event_loop()->onDelay(0, [this]() { this->emit(this->output_); });
-  }
-
-  ~WiFiStateProducer() { remove_wifi_callbacks(); }
-
-  WiFiStateProducer(WiFiStateProducer& other) = delete;
-  void operator=(const WiFiStateProducer&) = delete;
-
- protected:
-  wifi_event_id_t wifi_sta_got_ip_event_id_;
-  wifi_event_id_t wifi_ap_start_event_id_;
-  wifi_event_id_t wifi_sta_disconnected_event_id_;
-  wifi_event_id_t wifi_ap_stop_event_id_;
-
-  void setup_wifi_callbacks() {
-    wifi_sta_got_ip_event_id_ = WiFi.onEvent(
-        [this](WiFiEvent_t event, WiFiEventInfo_t info) {
-          this->wifi_station_connected();
-        },
-        WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
-    wifi_ap_start_event_id_ =
-        WiFi.onEvent([this](WiFiEvent_t event,
-                            WiFiEventInfo_t info) { this->wifi_ap_enabled(); },
-                     WiFiEvent_t::ARDUINO_EVENT_WIFI_AP_START);
-    wifi_sta_disconnected_event_id_ = WiFi.onEvent(
-        [this](WiFiEvent_t event, WiFiEventInfo_t info) {
-          this->wifi_disconnected();
-        },
-        WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
-    wifi_ap_stop_event_id_ = WiFi.onEvent(
-        [this](WiFiEvent_t event, WiFiEventInfo_t info) {
-          this->wifi_disconnected();
-        },
-        WiFiEvent_t::ARDUINO_EVENT_WIFI_AP_STOP);
-  }
-
-  void remove_wifi_callbacks() {
-    WiFi.removeEvent(wifi_sta_got_ip_event_id_);
-    WiFi.removeEvent(wifi_ap_start_event_id_);
-    WiFi.removeEvent(wifi_sta_disconnected_event_id_);
-    WiFi.removeEvent(wifi_ap_stop_event_id_);
-  }
-
-  void wifi_station_connected() {
-    ESP_LOGI(__FILENAME__, "Connected to wifi, SSID: %s (signal: %d)",
-             WiFi.SSID().c_str(), WiFi.RSSI());
-    ESP_LOGI(__FILENAME__, "IP address of Device: %s",
-             WiFi.localIP().toString().c_str());
-    ESP_LOGI(__FILENAME__, "Default route: %s",
-             WiFi.gatewayIP().toString().c_str());
-    ESP_LOGI(__FILENAME__, "DNS server: %s", WiFi.dnsIP().toString().c_str());
-    this->emit(WiFiState::kWifiConnectedToAP);
-  }
-
-  void wifi_ap_enabled() {
-    ESP_LOGI(__FILENAME__, "WiFi Access Point enabled, SSID: %s",
-             WiFi.softAPSSID().c_str());
-    ESP_LOGI(__FILENAME__, "IP address of Device: %s",
-             WiFi.softAPIP().toString().c_str());
-
-    // Setting the AP mode happens immediately,
-    // so this callback is likely called already before all startables have been
-    // initiated. Delay the WiFi state update until the start of the event loop.
-    event_loop()->onDelay(
-        0, [this]() { this->emit(WiFiState::kWifiAPModeActivated); });
-  }
-
-  void wifi_disconnected() {
-    ESP_LOGI(__FILENAME__, "Disconnected from wifi.");
-    this->emit(WiFiState::kWifiDisconnected);
-  }
-};
 
 /**
  * @brief Storage object for WiFi access point settings.
@@ -243,7 +154,7 @@ class WiFiNetworkInfo {
  */
 class Networking : public FileSystemSaveable,
                    public Resettable,
-                   public ValueProducer<WiFiState> {
+                   public ValueProducer<NetworkState> {
  public:
   Networking(const String& config_path, const String& client_ssid = "",
              const String& client_password = "", const String& ap_ssid = "",
@@ -262,8 +173,13 @@ class Networking : public FileSystemSaveable,
     return ap_settings_.captive_portal_enabled_;
   }
 
-  const std::shared_ptr<WiFiStateProducer>& get_wifi_state_producer() {
-    return wifi_state_producer_;
+  const std::shared_ptr<NetworkStateProducer>& get_network_state_producer() {
+    return network_state_producer_;
+  }
+
+  // Backward compatibility alias
+  const std::shared_ptr<NetworkStateProducer>& get_wifi_state_producer() {
+    return get_network_state_producer();
   }
 
  protected:
@@ -277,10 +193,10 @@ class Networking : public FileSystemSaveable,
 
   std::unique_ptr<DNSServer> dns_server_;
 
-  std::shared_ptr<WiFiStateProducer> wifi_state_producer_ =
-      std::make_shared<WiFiStateProducer>();
+  std::shared_ptr<NetworkStateProducer> network_state_producer_ =
+      std::make_shared<NetworkStateProducer>();
 
-  std::shared_ptr<LambdaConsumer<WiFiState>> wifi_state_emitter_;
+  std::shared_ptr<LambdaConsumer<NetworkState>> network_state_emitter_;
 };
 
 inline const String ConfigSchema(const Networking& obj) {
@@ -288,6 +204,10 @@ inline const String ConfigSchema(const Networking& obj) {
 }
 
 inline bool ConfigRequiresRestart(const Networking& obj) { return true; }
+
+// Semantic alias — Networking is the WiFi provisioner. New code can use this
+// name to make the role explicit when used alongside EthernetProvisioner.
+using WiFiProvisioner = Networking;
 
 }  // namespace sensesp
 

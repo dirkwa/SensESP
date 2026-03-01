@@ -2,6 +2,7 @@
 
 #include "system_info.h"
 
+#include <ETH.h>
 #include <WiFi.h>
 
 #include "Arduino.h"
@@ -28,8 +29,19 @@ void FreeMem::update() { this->emit(ESP.getFreeHeap()); }
 
 void Uptime::update() { this->emit(static_cast<double>(millis()) / 1000.); }
 
-void IPAddrDev::update() { this->emit(WiFi.localIP().toString()); }
+void IPAddrDev::update() {
+  // Report IP from whichever interface is online: Ethernet first, then WiFi.
+  if (ETH.hasIP()) {
+    this->emit(ETH.localIP().toString());
+  } else {
+    this->emit(WiFi.localIP().toString());
+  }
+}
 
-void WiFiSignal::update() { this->emit(WiFi.RSSI()); }
+void WiFiSignal::update() {
+  if (WiFi.isConnected()) {
+    this->emit(WiFi.RSSI());
+  }
+}
 
 }  // namespace sensesp
