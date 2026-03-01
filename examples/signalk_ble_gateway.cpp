@@ -1,22 +1,24 @@
 /**
- * @file victron_ble_gateway.cpp
- * @brief BLE-to-Ethernet gateway for Victron devices
+ * @file signalk_ble_gateway.cpp
+ * @brief BLE-to-Ethernet gateway for Signal K
  *
- * Scans for Victron BLE advertisements and forwards the raw manufacturer
- * data to the bt-sensors-plugin-sk Signal K plugin over HTTP.  The plugin
- * handles decryption, parsing, and Signal K delta emission for all
- * supported Victron device types (battery monitors, solar chargers,
- * inverters, DC-DC converters, etc.).
+ * Scans for BLE advertisements and forwards raw manufacturer data to the
+ * bt-sensors-plugin-sk Signal K plugin over HTTP.  The plugin handles
+ * device identification, decryption, parsing, and Signal K delta emission.
+ *
+ * The gateway is device-agnostic — it forwards all BLE advertisements that
+ * contain manufacturer data.  The plugin decides which devices it supports
+ * (Victron, Ruuvi, Xiaomi, etc.).
  *
  * Why this architecture?
- * - Zero Victron parsing code on the ESP32 — the plugin already has it
+ * - Zero parsing code on the ESP32 — the plugin already has it
  * - Encryption keys are configured on the server (plugin UI), not firmware
- * - All 13+ Victron device types work immediately
+ * - All supported sensor types work immediately
  * - Ethernet + BLE coexist perfectly — no WiFi radio contention
  *
  * Requirements:
  * - PoE Ethernet ESP32 board (e.g. Olimex ESP32-POE-ISO)
- * - bt-sensors-plugin-sk with remote gateway support (remote-ble-gateway branch)
+ * - bt-sensors-plugin-sk with remote gateway support
  * - NimBLE-Arduino library (added via platformio.ini)
  *
  * @see https://github.com/naugehyde/bt-sensors-plugin-sk
@@ -34,9 +36,6 @@ using namespace sensesp;
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Victron BLE manufacturer ID (little-endian in advertisements)
-static constexpr uint16_t VICTRON_MANUFACTURER_ID = 0x02E1;
-
 /// How often to POST collected advertisements to the plugin (ms)
 static constexpr unsigned long POST_INTERVAL_MS = 2000;
 
@@ -48,6 +47,7 @@ struct BleAdvertisement {
   std::string mac;
   std::string name;
   int rssi;
+  uint16_t mfr_id;             // manufacturer ID (little-endian from BLE)
   std::vector<uint8_t> mfr_data;  // raw data after the 2-byte manufacturer ID
 };
 
@@ -85,7 +85,7 @@ static void resolve_plugin_url() {
 // NimBLE scan callback
 // ---------------------------------------------------------------------------
 
-class VictronScanCallbacks : public NimBLEScanCallbacks {
+class BLEScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* device) override {
     if (!device->haveManufacturerData()) return;
 
@@ -93,20 +93,17 @@ class VictronScanCallbacks : public NimBLEScanCallbacks {
     const uint8_t* data = reinterpret_cast<const uint8_t*>(mfr_raw.data());
     size_t len = mfr_raw.size();
 
-    // Need at least 2-byte manufacturer ID + 1 byte record type
+    // Need at least 2-byte manufacturer ID + 1 byte payload
     if (len < 3) return;
 
     // Manufacturer ID is first 2 bytes (little-endian)
     uint16_t mfr_id = data[0] | (data[1] << 8);
-    if (mfr_id != VICTRON_MANUFACTURER_ID) return;
-
-    // Remaining bytes are the payload (starting with record type 0x10)
-    if (data[2] != 0x10) return;
 
     BleAdvertisement adv;
     adv.mac = device->getAddress().toString();
     adv.name = device->haveName() ? device->getName() : "";
     adv.rssi = device->getRSSI();
+    adv.mfr_id = mfr_id;
     adv.mfr_data.assign(data + 2, data + len);
 
     xSemaphoreTake(ads_mutex, portMAX_DELAY);
@@ -170,8 +167,8 @@ static void send_advertisements() {
     }
 
     JsonObject mfr = dev["manufacturer_data"].to<JsonObject>();
-    // Key "737" = decimal for 0x02E1.  Value = hex of data after mfr ID.
-    mfr["737"] = bytes_to_hex(adv.mfr_data);
+    // Key = decimal manufacturer ID, value = hex payload after the ID
+    mfr[String(adv.mfr_id)] = bytes_to_hex(adv.mfr_data);
   }
 
   String body;
@@ -201,7 +198,7 @@ void setup() {
   ads_mutex = xSemaphoreCreateMutex();
 
   SensESPAppBuilder builder;
-  auto sensesp_app = builder.set_hostname("victron-ble-gw")
+  auto sensesp_app = builder.set_hostname("signalk-ble-gw")
                          ->set_ethernet(EthernetConfig::olimex_esp32_poe_iso())
                          ->enable_ota("thisismyota")
                          ->get_app();
@@ -209,7 +206,7 @@ void setup() {
   // Initialize NimBLE scanner (observer role only)
   NimBLEDevice::init("");
   NimBLEScan* scan = NimBLEDevice::getScan();
-  scan->setScanCallbacks(new VictronScanCallbacks(), true);  // wantDuplicates
+  scan->setScanCallbacks(new BLEScanCallbacks(), true);  // wantDuplicates
   scan->setActiveScan(false);   // passive = sufficient for advertisements
   scan->setInterval(100);       // scan interval (ms)
   scan->setWindow(99);          // scan window (ms), <= interval
@@ -219,7 +216,7 @@ void setup() {
   // Periodically forward collected advertisements to the plugin
   event_loop()->onRepeat(POST_INTERVAL_MS, send_advertisements);
 
-  ESP_LOGI("BLE-GW", "Victron BLE Gateway started");
+  ESP_LOGI("BLE-GW", "Signal K BLE Gateway started");
 }
 
 void loop() { event_loop()->tick(); }
