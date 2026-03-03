@@ -27,6 +27,7 @@ class SensESPAppBuilder : public SensESPBaseAppBuilder {
   String sk_server_address_ = "";
   uint16_t sk_server_port_ = 0;
   bool ethernet_enabled_ = false;
+  bool wifi_disabled_ = false;
   EthernetConfig ethernet_config_;
 
  protected:
@@ -98,6 +99,22 @@ class SensESPAppBuilder : public SensESPBaseAppBuilder {
   SensESPAppBuilder* set_ethernet(const EthernetConfig& config) {
     ethernet_config_ = config;
     ethernet_enabled_ = true;
+    return this;
+  }
+
+  /**
+   * @brief Disable WiFi completely.
+   *
+   * When set, the WiFi radio is never initialized.  Use this for
+   * Ethernet-only configurations (especially when BLE is also needed,
+   * since WiFi and BLE share the ESP32 radio and interfere with each
+   * other).  The Ethernet interface must be configured separately with
+   * set_ethernet().
+   *
+   * @return SensESPAppBuilder*
+   */
+  SensESPAppBuilder* disable_wifi() {
+    wifi_disabled_ = true;
     return this;
   }
 
@@ -321,6 +338,9 @@ class SensESPAppBuilder : public SensESPBaseAppBuilder {
     app_ = SensESPApp::get();
     if (ethernet_enabled_) {
       app_->set_ethernet_config(ethernet_config_);
+    }
+    if (wifi_disabled_) {
+      app_->set_wifi_disabled(true);
     }
     app_->setup();
     return app_;

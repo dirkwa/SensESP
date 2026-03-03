@@ -158,7 +158,7 @@ class Networking : public FileSystemSaveable,
  public:
   Networking(const String& config_path, const String& client_ssid = "",
              const String& client_password = "", const String& ap_ssid = "",
-             const String& ap_password = "");
+             const String& ap_password = "", bool wifi_disabled = false);
   ~Networking();
 
   virtual void reset() override;

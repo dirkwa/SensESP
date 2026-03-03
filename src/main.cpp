@@ -32,6 +32,12 @@
 
 using namespace sensesp;
 
+// The Arduino startup code (initArduino) calls the weak btInUse() to decide
+// whether to release Bluetooth memory (~36 KB).  The default returns false
+// when the built-in BLE library isn't linked.  Since we use the external
+// NimBLE-Arduino library, we provide a strong override to keep BT memory.
+extern "C" bool btInUse() { return true; }
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -199,11 +205,12 @@ void setup() {
 
   SensESPAppBuilder builder;
   auto sensesp_app = builder.set_hostname("signalk-ble-gw")
+                         ->disable_wifi()
                          ->set_ethernet(EthernetConfig::olimex_esp32_poe_iso())
                          ->enable_ota("thisismyota")
                          ->get_app();
 
-  // Initialize NimBLE scanner (observer role only)
+  // Initialize NimBLE scanner (observer role only — WiFi is off)
   NimBLEDevice::init("");
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(new BLEScanCallbacks(), true);  // wantDuplicates

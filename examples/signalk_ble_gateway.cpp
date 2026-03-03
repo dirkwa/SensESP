@@ -199,11 +199,12 @@ void setup() {
 
   SensESPAppBuilder builder;
   auto sensesp_app = builder.set_hostname("signalk-ble-gw")
+                         ->disable_wifi()
                          ->set_ethernet(EthernetConfig::olimex_esp32_poe_iso())
                          ->enable_ota("thisismyota")
                          ->get_app();
 
-  // Initialize NimBLE scanner (observer role only)
+  // Initialize NimBLE scanner (observer role only — WiFi is off)
   NimBLEDevice::init("");
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(new BLEScanCallbacks(), true);  // wantDuplicates
