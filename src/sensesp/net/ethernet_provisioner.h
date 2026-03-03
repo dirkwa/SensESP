@@ -101,7 +101,18 @@ class EthernetProvisioner {
     }
 
     ETH.setHostname(hostname.c_str());
-    ESP_LOGI(__FILENAME__, "Ethernet interface initialized");
+    ESP_LOGI(__FILENAME__, "Ethernet interface initialized, waiting for IP...");
+
+    // Wait for DHCP to assign an IP address (up to 15 seconds)
+    for (int i = 0; i < 150 && !ETH.hasIP(); i++) {
+      delay(100);
+    }
+
+    if (ETH.hasIP()) {
+      ESP_LOGI(__FILENAME__, "Ethernet IP: %s", ETH.localIP().toString().c_str());
+    } else {
+      ESP_LOGW(__FILENAME__, "DHCP timeout — no IP address after 15 s");
+    }
   }
 };
 
