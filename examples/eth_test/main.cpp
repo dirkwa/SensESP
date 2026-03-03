@@ -154,26 +154,19 @@ static void startPing(const char* target) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n\n=== Aptinex Ethernet Diag v4 ===");
+  Serial.println("\n\n=== Aptinex Ethernet Diag v5 ===");
 
   Network.onEvent(onEthEvent);
 
-  // Ensure GPIO0 is clean input before PHY powers up
-  // (LAN8720 samples nINT/REFCLKO at reset for clock mode strap)
-  gpio_reset_pin(GPIO_NUM_0);
-  gpio_set_direction(GPIO_NUM_0, GPIO_MODE_INPUT);
-  gpio_pullup_dis(GPIO_NUM_0);
-  gpio_pulldown_dis(GPIO_NUM_0);
-
-  // Power-cycle PHY: ensure clean reset
+  // Power on PHY — do NOT touch GPIO0 before ETH.begin()
+  // ETH.begin() configures GPIO0 via IOMUX for the EMAC RMII clock.
+  // Any prior gpio_reset_pin/gpio_set_direction on GPIO0 disconnects
+  // it from IOMUX and breaks the EMAC clock input.
   pinMode(ETH_PHY_POWER, OUTPUT);
-  digitalWrite(ETH_PHY_POWER, LOW);
-  delay(100);
-  Serial.println("Powering PHY ON...");
   digitalWrite(ETH_PHY_POWER, HIGH);
-  delay(500);  // LAN8720 needs ~200ms PLL lock after power-on
+  delay(500);
 
-  // Start Ethernet
+  // Start Ethernet — this configures GPIO0 as EMAC CLK input
   bool ok = ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC,
                        ETH_PHY_MDIO, -1, ETH_CLK_MODE);
   Serial.printf("ETH.begin() = %s\n", ok ? "true" : "false");
