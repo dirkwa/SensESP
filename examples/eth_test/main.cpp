@@ -12,6 +12,7 @@
 #include <ping/ping_sock.h>
 #include <soc/emac_dma_struct.h>
 #include <soc/emac_mac_struct.h>
+#include <soc/emac_ext_struct.h>
 
 // Aptinex IsolPoE pin configuration
 #define ETH_PHY_TYPE   ETH_PHY_LAN8720
@@ -96,6 +97,18 @@ void dumpAll() {
 
   Serial.printf("Missed: %lu  Overflow: %lu\n",
                 EMAC_DMA.dmamissedfr.missed_fc, EMAC_DMA.dmamissedfr.overflow_fc);
+
+  // EMAC EXT clock configuration
+  Serial.println("--- CLK ---");
+  Serial.printf("ex_clk_ctrl:    0x%08lX  ext_en=%lu int_en=%lu clk_en=%lu\n",
+                EMAC_EXT.ex_clk_ctrl.val,
+                EMAC_EXT.ex_clk_ctrl.ext_en, EMAC_EXT.ex_clk_ctrl.int_en,
+                EMAC_EXT.ex_clk_ctrl.clk_en);
+  Serial.printf("ex_oscclk_conf: 0x%08lX  clk_sel=%lu\n",
+                EMAC_EXT.ex_oscclk_conf.val, EMAC_EXT.ex_oscclk_conf.clk_sel);
+  Serial.printf("ex_phyinf_conf: 0x%08lX  phy_intf_sel=%lu\n",
+                EMAC_EXT.ex_phyinf_conf.val, EMAC_EXT.ex_phyinf_conf.phy_intf_sel);
+  Serial.printf("ex_clkout_conf: 0x%08lX\n", EMAC_EXT.ex_clkout_conf.val);
   Serial.println("---");
 }
 
