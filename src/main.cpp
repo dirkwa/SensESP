@@ -197,18 +197,10 @@ void setup() {
 
   ads_mutex = xSemaphoreCreateMutex();
 
-  // Use static IP to bypass DHCP issues during testing
-  EthernetConfig eth = EthernetConfig::aptinex_isolpoe();
-  eth.use_dhcp = false;
-  eth.ip = IPAddress(192, 168, 0, 120);
-  eth.gateway = IPAddress(192, 168, 0, 1);
-  eth.netmask = IPAddress(255, 255, 255, 0);
-  eth.dns = IPAddress(192, 168, 0, 1);
-
   SensESPAppBuilder builder;
   auto sensesp_app = builder.set_hostname("signalk-ble-gw")
                          ->disable_wifi()
-                         ->set_ethernet(eth)
+                         ->set_ethernet(EthernetConfig::aptinex_isolpoe())
                          ->set_sk_server("192.168.0.122", 4000)
                          ->enable_ota("thisismyota")
                          ->get_app();
