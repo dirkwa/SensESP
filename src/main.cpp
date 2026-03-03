@@ -207,6 +207,7 @@ void setup() {
   auto sensesp_app = builder.set_hostname("signalk-ble-gw")
                          ->disable_wifi()
                          ->set_ethernet(EthernetConfig::aptinex_isolpoe())
+                         ->set_sk_server("192.168.0.122", 4000)
                          ->enable_ota("thisismyota")
                          ->get_app();
 
