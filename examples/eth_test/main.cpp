@@ -8,7 +8,7 @@
 #include <Arduino.h>
 #include <ETH.h>
 #include <driver/gpio.h>
-#include <esp_eth_phy_802_3.h>
+#include <esp_eth_driver.h>
 
 // Aptinex IsolPoE pin configuration
 #define ETH_PHY_TYPE   ETH_PHY_LAN8720
@@ -20,6 +20,14 @@
 
 static volatile bool link_up = false;
 static volatile bool got_ip = false;
+
+// Read a PHY register via ESP-IDF ioctl (ETHClass has no phyRead)
+static uint16_t phyRead(uint32_t reg) {
+  uint32_t value = 0;
+  esp_eth_phy_reg_rw_data_t rw = { .reg_addr = reg, .reg_value_p = &value };
+  esp_eth_ioctl(ETH.handle(), ETH_CMD_READ_PHY_REG, &rw);
+  return (uint16_t)value;
+}
 
 void onEthEvent(arduino_event_id_t event, arduino_event_info_t info) {
   switch (event) {
@@ -55,7 +63,7 @@ void dumpPhyRegisters() {
   Serial.println("\n--- LAN8720 PHY Registers ---");
 
   // Reg 0: Basic Control Register
-  uint16_t bcr = ETH.phyRead(0x00);
+  uint16_t bcr = phyRead(0x00);
   Serial.printf("Reg 0  BCR:   0x%04X", bcr);
   if (bcr & 0x8000) Serial.print(" [RESET]");
   if (bcr & 0x4000) Serial.print(" [LOOPBACK]");
@@ -67,7 +75,7 @@ void dumpPhyRegisters() {
   Serial.println();
 
   // Reg 1: Basic Status Register
-  uint16_t bsr = ETH.phyRead(0x01);
+  uint16_t bsr = phyRead(0x01);
   Serial.printf("Reg 1  BSR:   0x%04X", bsr);
   if (bsr & 0x0004) Serial.print(" [LINK_UP]");
   else Serial.print(" [LINK_DOWN]");
@@ -76,35 +84,35 @@ void dumpPhyRegisters() {
   Serial.println();
 
   // Reg 2,3: PHY ID
-  uint16_t id1 = ETH.phyRead(0x02);
-  uint16_t id2 = ETH.phyRead(0x03);
+  uint16_t id1 = phyRead(0x02);
+  uint16_t id2 = phyRead(0x03);
   Serial.printf("Reg 2,3 PHY ID: 0x%04X:0x%04X\n", id1, id2);
 
   // Reg 4: Auto-negotiation advertisement
-  uint16_t anar = ETH.phyRead(0x04);
+  uint16_t anar = phyRead(0x04);
   Serial.printf("Reg 4  ANAR:  0x%04X\n", anar);
 
   // Reg 5: Auto-negotiation link partner ability
-  uint16_t anlpar = ETH.phyRead(0x05);
+  uint16_t anlpar = phyRead(0x05);
   Serial.printf("Reg 5  ANLPAR:0x%04X\n", anlpar);
 
   // Reg 17: Mode Control/Status (LAN8720-specific)
-  uint16_t mcsr = ETH.phyRead(0x11);
+  uint16_t mcsr = phyRead(0x11);
   Serial.printf("Reg 17 MCSR:  0x%04X", mcsr);
   if (mcsr & 0x0002) Serial.print(" [ENERGYON]");
   Serial.println();
 
   // Reg 18: Special Modes
-  uint16_t smr = ETH.phyRead(0x12);
+  uint16_t smr = phyRead(0x12);
   Serial.printf("Reg 18 SMR:   0x%04X (PHY addr=%d, mode=%d)\n",
                 smr, smr & 0x1F, (smr >> 5) & 0x07);
 
   // Reg 26: PHY Special Control/Status Indication
-  uint16_t pscsi = ETH.phyRead(0x1A);
+  uint16_t pscsi = phyRead(0x1A);
   Serial.printf("Reg 26 PSCSI: 0x%04X\n", pscsi);
 
   // Reg 31: PHY Special Control/Status
-  uint16_t pscsr = ETH.phyRead(0x1F);
+  uint16_t pscsr = phyRead(0x1F);
   Serial.printf("Reg 31 PSCSR: 0x%04X", pscsr);
   if (pscsr & 0x1000) Serial.print(" [AUTODONE]");
   int speed_ind = (pscsr >> 2) & 0x07;
