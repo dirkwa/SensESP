@@ -206,7 +206,7 @@ void setup() {
   SensESPAppBuilder builder;
   auto sensesp_app = builder.set_hostname("signalk-ble-gw")
                          ->disable_wifi()
-                         ->set_ethernet(EthernetConfig::olimex_esp32_poe_iso())
+                         ->set_ethernet(EthernetConfig::aptinex_isolpoe())
                          ->enable_ota("thisismyota")
                          ->get_app();
 
