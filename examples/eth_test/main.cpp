@@ -17,6 +17,7 @@
 #define ETH_CLK_MODE    ETH_CLOCK_GPIO0_IN
 
 #include <ETH.h>
+#include <NetworkClient.h>
 
 static bool eth_connected = false;
 
@@ -27,7 +28,11 @@ void onEvent(arduino_event_id_t event) {
       ETH.setHostname("aptinex-test");
       break;
     case ARDUINO_EVENT_ETH_CONNECTED:
-      Serial.println("ETH Connected");
+      Serial.println("ETH Connected — assigning static IP");
+      ETH.config(IPAddress(192, 168, 0, 120),
+                 IPAddress(192, 168, 0, 1),
+                 IPAddress(255, 255, 255, 0),
+                 IPAddress(192, 168, 0, 1));
       break;
     case ARDUINO_EVENT_ETH_GOT_IP:
       Serial.print("ETH Got IP: ");
@@ -65,13 +70,29 @@ void setup() {
   Serial.println("ETH.begin() done, waiting...");
 }
 
+void testConnection() {
+  Serial.println("Connecting to 192.168.0.147:80...");
+  NetworkClient client;
+  if (client.connect(IPAddress(192, 168, 0, 147), 80)) {
+    Serial.println("TCP connect OK!");
+    client.stop();
+  } else {
+    Serial.println("TCP connect failed");
+  }
+}
+
 void loop() {
   static unsigned long last = 0;
+  static bool tested = false;
   if (millis() - last > 5000) {
     last = millis();
     Serial.printf("[%lus] connected=%d IP=%s MAC=%s\n",
                   millis() / 1000, (int)eth_connected,
                   ETH.localIP().toString().c_str(),
                   ETH.macAddress().c_str());
+    if (eth_connected && !tested) {
+      tested = true;
+      testConnection();
+    }
   }
 }
