@@ -154,18 +154,24 @@ static void startPing(const char* target) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n\n=== Aptinex Ethernet Diag v3 ===");
+  Serial.println("\n\n=== Aptinex Ethernet Diag v4 ===");
 
   Network.onEvent(onEthEvent);
 
-  // Power on PHY
-  pinMode(ETH_PHY_POWER, OUTPUT);
-  digitalWrite(ETH_PHY_POWER, HIGH);
-  delay(500);
-
-  // Clear GPIO0 pulls (50 MHz clock input)
+  // Ensure GPIO0 is clean input before PHY powers up
+  // (LAN8720 samples nINT/REFCLKO at reset for clock mode strap)
+  gpio_reset_pin(GPIO_NUM_0);
+  gpio_set_direction(GPIO_NUM_0, GPIO_MODE_INPUT);
   gpio_pullup_dis(GPIO_NUM_0);
   gpio_pulldown_dis(GPIO_NUM_0);
+
+  // Power-cycle PHY: ensure clean reset
+  pinMode(ETH_PHY_POWER, OUTPUT);
+  digitalWrite(ETH_PHY_POWER, LOW);
+  delay(100);
+  Serial.println("Powering PHY ON...");
+  digitalWrite(ETH_PHY_POWER, HIGH);
+  delay(500);  // LAN8720 needs ~200ms PLL lock after power-on
 
   // Start Ethernet
   bool ok = ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC,
