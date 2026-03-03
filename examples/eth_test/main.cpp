@@ -33,6 +33,12 @@ static uint16_t phyRead(uint32_t reg) {
   return (uint16_t)value;
 }
 
+static void phyWrite(uint32_t reg, uint16_t value) {
+  uint32_t val32 = value;
+  esp_eth_phy_reg_rw_data_t rw = { .reg_addr = reg, .reg_value_p = &val32 };
+  esp_eth_ioctl(ETH.handle(), ETH_CMD_WRITE_PHY_REG, &rw);
+}
+
 void onEthEvent(arduino_event_id_t event, arduino_event_info_t info) {
   switch (event) {
     case ARDUINO_EVENT_ETH_START:
@@ -154,14 +160,11 @@ static void startPing(const char* target) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n\n=== Aptinex Ethernet Diag v5 ===");
+  Serial.println("\n\n=== Aptinex Ethernet Diag v6 ===");
 
   Network.onEvent(onEthEvent);
 
-  // Power on PHY — do NOT touch GPIO0 before ETH.begin()
-  // ETH.begin() configures GPIO0 via IOMUX for the EMAC RMII clock.
-  // Any prior gpio_reset_pin/gpio_set_direction on GPIO0 disconnects
-  // it from IOMUX and breaks the EMAC clock input.
+  // Power on PHY
   pinMode(ETH_PHY_POWER, OUTPUT);
   digitalWrite(ETH_PHY_POWER, HIGH);
   delay(500);
@@ -170,6 +173,25 @@ void setup() {
   bool ok = ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC,
                        ETH_PHY_MDIO, -1, ETH_CLK_MODE);
   Serial.printf("ETH.begin() = %s\n", ok ? "true" : "false");
+
+  // Dump all PHY registers before reset
+  Serial.println("PHY regs before reset:");
+  for (int r = 0; r < 32; r++) {
+    uint16_t v = phyRead(r);
+    if (v != 0x0000 && v != 0xFFFF)
+      Serial.printf("  Reg %2d: 0x%04X\n", r, v);
+  }
+
+  // Software-reset the PHY to clear any stuck state
+  Serial.println("Issuing PHY software reset (BCR bit 15)...");
+  phyWrite(0x00, 0x8000);
+  delay(100);  // wait for reset to complete
+  Serial.printf("BCR after reset: 0x%04X\n", phyRead(0x00));
+
+  // Restart auto-negotiation
+  Serial.println("Restarting auto-negotiation...");
+  phyWrite(0x00, 0x3300);  // 100Mbps + AN enable + restart AN + full duplex
+  delay(100);
 
   // Wait up to 10s for link
   Serial.println("Waiting for link...");
