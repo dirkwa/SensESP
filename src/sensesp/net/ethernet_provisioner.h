@@ -31,10 +31,10 @@ struct EthernetConfig {
 
   // Board presets
   static EthernetConfig olimex_esp32_poe_iso() {
-    // power=-1: PHY is powered by PoE/USB, no GPIO power control needed.
-    // GPIO12 is a strapping pin (MTDI) — letting the driver toggle it
-    // causes flash-voltage conflicts and PHY power-up timeouts.
-    return {ETH_PHY_LAN8720, 0, 23, 18, -1, ETH_CLOCK_GPIO17_OUT};
+    // GPIO12 controls 3.3V power to the isolated PHY section via FETs.
+    // WiFi must be disabled before ETH.begin() — WiFi grabs GPIO12 and
+    // prevents the driver from power-cycling the PHY.
+    return {ETH_PHY_LAN8720, 0, 23, 18, 12, ETH_CLOCK_GPIO17_OUT};
   }
   static EthernetConfig olimex_esp32_gateway() {
     return {ETH_PHY_LAN8720, 0, 23, 18, 5, ETH_CLOCK_GPIO17_OUT};
