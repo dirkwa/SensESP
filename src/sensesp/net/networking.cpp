@@ -26,7 +26,7 @@ namespace sensesp {
 
 Networking::Networking(const String& config_path, const String& client_ssid,
                        const String& client_password, const String& ap_ssid,
-                       const String& ap_password)
+                       const String& ap_password, bool wifi_disabled)
     : FileSystemSaveable{config_path}, Resettable(0) {
   // Connect the network state producer to forward state changes through
   // this object's ValueProducer output.
@@ -34,6 +34,19 @@ Networking::Networking(const String& config_path, const String& client_ssid,
           [this](NetworkState state) { this->emit(state); });
 
   network_state_producer_->connect_to(network_state_emitter_);
+
+  // When WiFi is disabled (e.g. Ethernet-only + BLE gateway), skip all
+  // WiFi initialization.  The NetworkStateProducer still listens for
+  // Ethernet events, so network state tracking works normally.
+  if (wifi_disabled) {
+    ESP_LOGI(__FILENAME__, "WiFi disabled — skipping WiFi initialization");
+    ap_settings_.enabled_ = false;
+    int num_fill = kMaxNumClientConfigs - client_settings_.size();
+    for (int i = 0; i < num_fill; i++) {
+      client_settings_.push_back(ClientSSIDConfig());
+    }
+    return;
+  }
 
   bool config_loaded = load();
 
