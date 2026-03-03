@@ -32,8 +32,9 @@ struct EthernetConfig {
   // Board presets
   static EthernetConfig olimex_esp32_poe_iso() {
     // GPIO12 controls 3.3V power to the isolated PHY section via FETs.
-    // WiFi must be disabled before ETH.begin() — WiFi grabs GPIO12 and
-    // prevents the driver from power-cycling the PHY.
+    // The provisioner handles the power-on manually with a proper delay,
+    // then passes power=-1 to ETH.begin() to skip the driver's too-fast
+    // reset-style toggle.
     return {ETH_PHY_LAN8720, 0, 23, 18, 12, ETH_CLOCK_GPIO17_OUT};
   }
   static EthernetConfig olimex_esp32_gateway() {
@@ -78,15 +79,35 @@ class EthernetProvisioner {
     String hostname = SensESPBaseApp::get_hostname();
 
     ESP_LOGI(__FILENAME__,
-             "Initializing Ethernet (PHY type=%d, addr=%d, MDC=%d, MDIO=%d)",
-             config.phy_type, config.phy_addr, config.mdc, config.mdio);
+             "Initializing Ethernet (PHY type=%d, addr=%d, MDC=%d, MDIO=%d, "
+             "power=%d)",
+             config.phy_type, config.phy_addr, config.mdc, config.mdio,
+             config.power);
+
+    // On boards like the Olimex ESP32-POE-ISO, the "power" GPIO controls
+    // 3.3V FETs to the isolated PHY section — not a reset pin.  The
+    // ESP-IDF driver treats it as a reset (quick low→high toggle), which
+    // is too fast for the power FET circuitry.  We handle the power-on
+    // manually with a proper stabilization delay, then pass power=-1 to
+    // ETH.begin() so the driver skips its reset cycle.
+    int power_pin = config.power;
+    if (power_pin >= 0) {
+      pinMode(power_pin, OUTPUT);
+      digitalWrite(power_pin, LOW);
+      delay(50);
+      digitalWrite(power_pin, HIGH);
+      delay(300);  // PHY needs time to power up + clock stabilization
+      ESP_LOGI(__FILENAME__, "PHY power pin %d toggled (manual power-on)",
+               power_pin);
+    }
 
     if (!config.use_dhcp) {
       ETH.config(config.ip, config.gateway, config.netmask, config.dns);
     }
 
+    // Pass power=-1 since we already handled the power pin manually
     bool started = ETH.begin(config.phy_type, config.phy_addr, config.mdc,
-                             config.mdio, config.power, config.clk_mode);
+                             config.mdio, -1, config.clk_mode);
 
     if (!started) {
       ESP_LOGE(__FILENAME__, "Failed to initialize Ethernet interface");
