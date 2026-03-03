@@ -46,6 +46,10 @@ struct EthernetConfig {
   static EthernetConfig wt32_eth01() {
     return {ETH_PHY_LAN8720, 1, 23, 18, 16, ETH_CLOCK_GPIO0_IN};
   }
+  static EthernetConfig aptinex_isolpoe() {
+    // External 50 MHz crystal oscillator on GPIO0; PHY power on GPIO17.
+    return {ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
+  }
 };
 
 /**
@@ -80,34 +84,16 @@ class EthernetProvisioner {
 
     ESP_LOGI(__FILENAME__,
              "Initializing Ethernet (PHY type=%d, addr=%d, MDC=%d, MDIO=%d, "
-             "power=%d)",
+             "power=%d, clk=%d)",
              config.phy_type, config.phy_addr, config.mdc, config.mdio,
-             config.power);
-
-    // On boards like the Olimex ESP32-POE-ISO, the "power" GPIO controls
-    // 3.3V FETs to the isolated PHY section — not a reset pin.  The
-    // ESP-IDF driver treats it as a reset (quick low→high toggle), which
-    // is too fast for the power FET circuitry.  We handle the power-on
-    // manually with a proper stabilization delay, then pass power=-1 to
-    // ETH.begin() so the driver skips its reset cycle.
-    int power_pin = config.power;
-    if (power_pin >= 0) {
-      pinMode(power_pin, OUTPUT);
-      digitalWrite(power_pin, LOW);
-      delay(50);
-      digitalWrite(power_pin, HIGH);
-      delay(300);  // PHY needs time to power up + clock stabilization
-      ESP_LOGI(__FILENAME__, "PHY power pin %d toggled (manual power-on)",
-               power_pin);
-    }
+             config.power, config.clk_mode);
 
     if (!config.use_dhcp) {
       ETH.config(config.ip, config.gateway, config.netmask, config.dns);
     }
 
-    // Pass power=-1 since we already handled the power pin manually
     bool started = ETH.begin(config.phy_type, config.phy_addr, config.mdc,
-                             config.mdio, -1, config.clk_mode);
+                             config.mdio, config.power, config.clk_mode);
 
     if (!started) {
       ESP_LOGE(__FILENAME__, "Failed to initialize Ethernet interface");
