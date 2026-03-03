@@ -61,28 +61,22 @@ static std::vector<BleAdvertisement> pending_ads;
 static SemaphoreHandle_t ads_mutex;
 
 // ---------------------------------------------------------------------------
-// Plugin URL — derived from Signal K server discovered via mDNS
+// Plugin URL
 // ---------------------------------------------------------------------------
+
+static constexpr const char* SK_SERVER_HOST = "192.168.0.122";
+static constexpr uint16_t SK_SERVER_PORT = 4000;
 
 static String plugin_api_url;
 
-/**
- * Try to build the plugin API URL from the SK WebSocket client's server
- * address/port.  Called periodically until successful.
- */
 static void resolve_plugin_url() {
   if (plugin_api_url.length() > 0) return;
 
-  auto ws = SensESPApp::get()->get_ws_client();
-  if (!ws) return;
+  if (!ETH.hasIP()) return;  // wait for DHCP
 
-  String addr = ws->get_server_address();
-  uint16_t port = ws->get_server_port();
-  if (addr.length() == 0 || port == 0) return;
-
-  plugin_api_url =
-      "http://" + addr + ":" + String(port) +
-      "/plugins/bt-sensors-plugin-sk/api/gateway/advertisements";
+  plugin_api_url = String("http://") + SK_SERVER_HOST + ":" +
+                   String(SK_SERVER_PORT) +
+                   "/plugins/bt-sensors-plugin-sk/api/gateway/advertisements";
 
   ESP_LOGI("BLE-GW", "Plugin URL resolved: %s", plugin_api_url.c_str());
 }
