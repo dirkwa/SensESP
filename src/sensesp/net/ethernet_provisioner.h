@@ -92,8 +92,20 @@ class EthernetProvisioner {
       ETH.config(config.ip, config.gateway, config.netmask, config.dns);
     }
 
+    // If a power pin is specified, drive it HIGH manually and give the PHY
+    // time to stabilize.  Then pass power=-1 to ETH.begin() so the driver
+    // doesn't do a reset-style low→high→low toggle that would cut power.
+    int power_for_driver = config.power;
+    if (config.power >= 0) {
+      ESP_LOGI(__FILENAME__, "Powering PHY via GPIO%d", config.power);
+      pinMode(config.power, OUTPUT);
+      digitalWrite(config.power, HIGH);
+      delay(500);  // let PHY power rail stabilize
+      power_for_driver = -1;
+    }
+
     bool started = ETH.begin(config.phy_type, config.phy_addr, config.mdc,
-                             config.mdio, config.power, config.clk_mode);
+                             config.mdio, power_for_driver, config.clk_mode);
 
     if (!started) {
       ESP_LOGE(__FILENAME__, "Failed to initialize Ethernet interface");
