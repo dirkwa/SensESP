@@ -153,26 +153,17 @@ class SensESPApp : public SensESPBaseApp {
 
     ap_ssid_ = SensESPBaseApp::get_hostname();
 
-    // When wifi_disabled_ is set, initialize Ethernet BEFORE Networking
-    // and skip all WiFi radio initialization.  The Networking constructor
-    // normally starts the WiFi stack (WiFi.begin) and may start an AP
-    // from saved SPIFFS config.  On ESP32, an active WiFi radio prevents
-    // the LAN8720 PHY from powering up (GPIO12 contention on Olimex
-    // boards) and blocks BLE controller init (shared radio).
-    if (wifi_disabled_ && ethernet_enabled_) {
-      ethernet_provisioner_ =
-          std::make_shared<EthernetProvisioner>(ethernet_config_);
-    }
-
-    // create the networking object
+    // Create the networking object first — its NetworkStateProducer
+    // registers event callbacks for ARDUINO_EVENT_ETH_GOT_IP etc.
+    // These must be in place BEFORE ETH.begin() triggers DHCP.
     networking_ = std::make_shared<Networking>("/System/WiFi Settings", ssid_,
                                                wifi_client_password_, ap_ssid_,
                                                ap_password_, wifi_disabled_);
 
     ConfigItem(networking_);
 
-    // create Ethernet provisioner if configured (standard WiFi+Ethernet path)
-    if (ethernet_enabled_ && !wifi_disabled_) {
+    // Now initialize Ethernet (ETH.begin → DHCP → GOT_IP event)
+    if (ethernet_enabled_) {
       ethernet_provisioner_ =
           std::make_shared<EthernetProvisioner>(ethernet_config_);
     }
