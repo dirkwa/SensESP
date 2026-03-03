@@ -101,7 +101,22 @@ class EthernetProvisioner {
     }
 
     ETH.setHostname(hostname.c_str());
-    ESP_LOGI(__FILENAME__, "Ethernet interface initialized, waiting for IP...");
+    ESP_LOGI(__FILENAME__, "Ethernet interface initialized, waiting for link...");
+
+    // Wait for physical link (up to 10 seconds)
+    for (int i = 0; i < 100 && !ETH.linkUp(); i++) {
+      delay(100);
+    }
+
+    if (!ETH.linkUp()) {
+      ESP_LOGE(__FILENAME__,
+               "Ethernet link not established after 10 s — check cable");
+      return;
+    }
+
+    ESP_LOGI(__FILENAME__, "Ethernet link up (%s, %s), waiting for DHCP...",
+             ETH.fullDuplex() ? "full duplex" : "half duplex",
+             ETH.linkSpeed() == 100 ? "100Mbps" : "10Mbps");
 
     // Wait for DHCP to assign an IP address (up to 15 seconds)
     for (int i = 0; i < 150 && !ETH.hasIP(); i++) {
