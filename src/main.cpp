@@ -38,6 +38,10 @@ static constexpr const char* SK_SERVER_HOST = "192.168.0.122";
 static constexpr uint16_t SK_SERVER_PORT = 4000;
 static constexpr unsigned long POST_INTERVAL_MS = 2000;
 static constexpr const char* GATEWAY_HOSTNAME = "signalk-ble-gw";
+static constexpr const char* SK_AUTH_TOKEN =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJkZXZpY2UiOiJzaWduYWxrLWJsZS1ndyIsImlhdCI6MTc3MjYwNTM5M30."
+    "aHaJEHNuOV4-0ed11TaD0a-a1orEW8tdO9IhXhOvep0";
 
 // ---------------------------------------------------------------------------
 // Ethernet state
@@ -61,7 +65,7 @@ void onEvent(arduino_event_id_t event) {
       eth_connected = true;
       plugin_api_url = String("http://") + SK_SERVER_HOST + ":" +
                        String(SK_SERVER_PORT) +
-                       "/plugins/bt-sensors-plugin-sk/api/gateway/advertisements";
+                       "/plugins/bt-sensors-plugin-sk/gateway/advertisements";
       Serial.print("Plugin URL: ");
       Serial.println(plugin_api_url);
       break;
@@ -191,6 +195,7 @@ static void send_advertisements() {
   HTTPClient http;
   http.begin(plugin_api_url);
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + SK_AUTH_TOKEN);
   http.setTimeout(5000);
 
   int code = http.POST(body);
