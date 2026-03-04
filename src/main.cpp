@@ -6,44 +6,84 @@
  * bt-sensors-plugin-sk Signal K plugin over HTTP.  The plugin handles
  * device identification, decryption, parsing, and Signal K delta emission.
  *
- * The gateway is device-agnostic — it forwards all BLE advertisements that
- * contain manufacturer data.  The plugin decides which devices it supports
- * (Victron, Ruuvi, Xiaomi, etc.).
- *
- * Why this architecture?
- * - Zero parsing code on the ESP32 — the plugin already has it
- * - Encryption keys are configured on the server (plugin UI), not firmware
- * - All supported sensor types work immediately
- * - Ethernet + BLE coexist perfectly — no WiFi radio contention
- *
- * Requirements:
- * - PoE Ethernet ESP32 board (e.g. Olimex ESP32-POE-ISO)
- * - bt-sensors-plugin-sk with remote gateway support
- * - NimBLE-Arduino library (added via platformio.ini)
- *
- * @see https://github.com/naugehyde/bt-sensors-plugin-sk
+ * Standalone firmware — no SensESP framework.  Uses:
+ * - Arduino ESP32 ETH for Ethernet (Aptinex IsolPoE board)
+ * - NimBLE-Arduino for BLE scanning
+ * - HTTPClient + ArduinoJson for POSTing to the plugin API
  */
 
-#include <ArduinoJson.h>
+#define ETH_PHY_TYPE    ETH_PHY_LAN8720
+#define ETH_PHY_ADDR    1
+#define ETH_PHY_MDC     23
+#define ETH_PHY_MDIO    18
+#define ETH_PHY_POWER   -1                // Don't let driver touch GPIO17
+#define ETH_CLK_MODE    ETH_CLOCK_GPIO0_IN
+
+#include <ETH.h>
+#include <WiFi.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <NimBLEDevice.h>
 
-#include "sensesp_app_builder.h"
+#define OSC_ENABLE_PIN  17  // 50MHz crystal oscillator enable
 
-using namespace sensesp;
-
-// The Arduino startup code (initArduino) calls the weak btInUse() to decide
-// whether to release Bluetooth memory (~36 KB).  The default returns false
-// when the built-in BLE library isn't linked.  Since we use the external
-// NimBLE-Arduino library, we provide a strong override to keep BT memory.
+// Keep BT memory — NimBLE needs it but Arduino doesn't detect external lib
 extern "C" bool btInUse() { return true; }
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// How often to POST collected advertisements to the plugin (ms)
+static constexpr const char* SK_SERVER_HOST = "192.168.0.122";
+static constexpr uint16_t SK_SERVER_PORT = 4000;
 static constexpr unsigned long POST_INTERVAL_MS = 2000;
+static constexpr const char* GATEWAY_HOSTNAME = "signalk-ble-gw";
+
+// ---------------------------------------------------------------------------
+// Ethernet state
+// ---------------------------------------------------------------------------
+
+static bool eth_connected = false;
+static String plugin_api_url;
+
+void onEvent(arduino_event_id_t event) {
+  switch (event) {
+    case ARDUINO_EVENT_ETH_START:
+      Serial.println("Ethernet Started");
+      ETH.setHostname(GATEWAY_HOSTNAME);
+      break;
+    case ARDUINO_EVENT_ETH_CONNECTED:
+      Serial.println("Ethernet Link Connected");
+      break;
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      Serial.print("Ethernet Got IP: ");
+      Serial.println(ETH.localIP());
+      eth_connected = true;
+      plugin_api_url = String("http://") + SK_SERVER_HOST + ":" +
+                       String(SK_SERVER_PORT) +
+                       "/plugins/bt-sensors-plugin-sk/api/gateway/advertisements";
+      Serial.print("Plugin URL: ");
+      Serial.println(plugin_api_url);
+      break;
+    case ARDUINO_EVENT_ETH_LOST_IP:
+      Serial.println("Ethernet Lost IP");
+      eth_connected = false;
+      plugin_api_url = "";
+      break;
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+      Serial.println("Ethernet Disconnected");
+      eth_connected = false;
+      plugin_api_url = "";
+      break;
+    case ARDUINO_EVENT_ETH_STOP:
+      Serial.println("Ethernet Stopped");
+      eth_connected = false;
+      plugin_api_url = "";
+      break;
+    default:
+      break;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Advertisement buffer (shared between BLE task and main loop)
@@ -53,33 +93,12 @@ struct BleAdvertisement {
   std::string mac;
   std::string name;
   int rssi;
-  uint16_t mfr_id;                // manufacturer ID (little-endian from BLE)
-  std::vector<uint8_t> mfr_data;  // raw data after the 2-byte manufacturer ID
+  uint16_t mfr_id;
+  std::vector<uint8_t> mfr_data;
 };
 
 static std::vector<BleAdvertisement> pending_ads;
 static SemaphoreHandle_t ads_mutex;
-
-// ---------------------------------------------------------------------------
-// Plugin URL
-// ---------------------------------------------------------------------------
-
-static constexpr const char* SK_SERVER_HOST = "192.168.0.122";
-static constexpr uint16_t SK_SERVER_PORT = 4000;
-
-static String plugin_api_url;
-
-static void resolve_plugin_url() {
-  if (plugin_api_url.length() > 0) return;
-
-  if (!ETH.hasIP()) return;  // wait for DHCP
-
-  plugin_api_url = String("http://") + SK_SERVER_HOST + ":" +
-                   String(SK_SERVER_PORT) +
-                   "/plugins/bt-sensors-plugin-sk/api/gateway/advertisements";
-
-  ESP_LOGI("BLE-GW", "Plugin URL resolved: %s", plugin_api_url.c_str());
-}
 
 // ---------------------------------------------------------------------------
 // NimBLE scan callback
@@ -93,10 +112,8 @@ class BLEScanCallbacks : public NimBLEScanCallbacks {
     const uint8_t* data = reinterpret_cast<const uint8_t*>(mfr_raw.data());
     size_t len = mfr_raw.size();
 
-    // Need at least 2-byte manufacturer ID + 1 byte payload
     if (len < 3) return;
 
-    // Manufacturer ID is first 2 bytes (little-endian)
     uint16_t mfr_id = data[0] | (data[1] << 8);
 
     BleAdvertisement adv;
@@ -108,7 +125,6 @@ class BLEScanCallbacks : public NimBLEScanCallbacks {
 
     xSemaphoreTake(ads_mutex, portMAX_DELAY);
 
-    // Deduplicate: keep latest per MAC
     auto it = std::find_if(
         pending_ads.begin(), pending_ads.end(),
         [&](const BleAdvertisement& a) { return a.mac == adv.mac; });
@@ -139,7 +155,6 @@ static String bytes_to_hex(const std::vector<uint8_t>& data) {
 }
 
 static void send_advertisements() {
-  resolve_plugin_url();
   if (plugin_api_url.length() == 0) return;
 
   xSemaphoreTake(ads_mutex, portMAX_DELAY);
@@ -152,7 +167,7 @@ static void send_advertisements() {
   xSemaphoreGive(ads_mutex);
 
   JsonDocument doc;
-  doc["gateway_id"] = SensESPBaseApp::get_hostname();
+  doc["gateway_id"] = GATEWAY_HOSTNAME;
 
   JsonArray devices = doc["devices"].to<JsonArray>();
   for (const auto& adv : ads) {
@@ -167,7 +182,6 @@ static void send_advertisements() {
     }
 
     JsonObject mfr = dev["manufacturer_data"].to<JsonObject>();
-    // Key = decimal manufacturer ID, value = hex payload after the ID
     mfr[String(adv.mfr_id)] = bytes_to_hex(adv.mfr_data);
   }
 
@@ -181,9 +195,9 @@ static void send_advertisements() {
 
   int code = http.POST(body);
   if (code == 200) {
-    ESP_LOGD("BLE-GW", "Forwarded %u device(s)", (unsigned)ads.size());
+    Serial.printf("Forwarded %u device(s)\n", (unsigned)ads.size());
   } else {
-    ESP_LOGW("BLE-GW", "POST failed: HTTP %d", code);
+    Serial.printf("POST failed: HTTP %d\n", code);
   }
   http.end();
 }
@@ -193,32 +207,42 @@ static void send_advertisements() {
 // ---------------------------------------------------------------------------
 
 void setup() {
-  SetupLogging();
+  Serial.begin(115200);
+  delay(300);
+  Serial.println();
+  Serial.println("Signal K BLE Gateway starting...");
+
+  // Enable 50MHz crystal oscillator before ETH init
+  pinMode(OSC_ENABLE_PIN, OUTPUT);
+  digitalWrite(OSC_ENABLE_PIN, HIGH);
+  delay(50);
+
+  WiFi.mode(WIFI_OFF);
+  Network.onEvent(onEvent);
+  ETH.begin();
 
   ads_mutex = xSemaphoreCreateMutex();
 
-  SensESPAppBuilder builder;
-  auto sensesp_app = builder.set_hostname("signalk-ble-gw")
-                         ->disable_wifi()
-                         ->set_ethernet(EthernetConfig::aptinex_isolpoe())
-                         ->set_sk_server("192.168.0.122", 4000)
-                         ->enable_ota("thisismyota")
-                         ->get_app();
-
-  // Initialize NimBLE scanner (observer role only — WiFi is off)
+  // Initialize NimBLE scanner
   NimBLEDevice::init("");
   NimBLEScan* scan = NimBLEDevice::getScan();
-  scan->setScanCallbacks(new BLEScanCallbacks(), true);  // wantDuplicates
-  scan->setActiveScan(false);   // passive = sufficient for advertisements
-  scan->setInterval(100);       // scan interval (ms)
-  scan->setWindow(99);          // scan window (ms), <= interval
-  scan->setDuplicateFilter(0);  // 0 = report duplicates
-  scan->start(0);               // 0 = scan continuously
+  scan->setScanCallbacks(new BLEScanCallbacks(), true);
+  scan->setActiveScan(false);
+  scan->setInterval(100);
+  scan->setWindow(99);
+  scan->setDuplicateFilter(0);
+  scan->start(0);
 
-  // Periodically forward collected advertisements to the plugin
-  event_loop()->onRepeat(POST_INTERVAL_MS, send_advertisements);
-
-  ESP_LOGI("BLE-GW", "Signal K BLE Gateway started");
+  Serial.println("BLE scanning started, waiting for Ethernet...");
 }
 
-void loop() { event_loop()->tick(); }
+static unsigned long last_post = 0;
+
+void loop() {
+  unsigned long now = millis();
+  if (now - last_post >= POST_INTERVAL_MS) {
+    last_post = now;
+    send_advertisements();
+  }
+  delay(1);
+}
