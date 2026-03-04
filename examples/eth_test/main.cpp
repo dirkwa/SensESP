@@ -1,54 +1,54 @@
-/**
- * @file main.cpp
- * @brief Aptinex IsolPoE Ethernet test — official approach
+/*
+ * Arduino V3 Sample Code for Aptinex IsolPoE - ESP32 ProDev Kit
  *
- * Uses defines-before-include pattern per Espressif ETH_LAN8720 example
- * and Aptinex official sample. Lets the driver handle PHY power pin.
+ * This sketch initializes the Ethernet controller (LAN8720),
+ * requests an IPv4 address via DHCP, disables WiFi, and prints
+ * the assigned IP address to the Serial Monitor.
  */
 
-#include <Arduino.h>
+// IMPORTANT: Define Ethernet PHY configuration BEFORE including <ETH.h>
+// These pin definitions are specific to the Aptinex IsolPoE board
+#define ETH_PHY_TYPE    ETH_PHY_LAN8720  // The board uses the LAN8720 PHY
+#define ETH_PHY_ADDR    1                 // PHY address for LAN8720 on this board
+#define ETH_PHY_MDC     23                // MDC pin
+#define ETH_PHY_MDIO    18                // MDIO pin
+#define ETH_PHY_POWER   17                // Power enable pin for the PHY
+#define ETH_CLK_MODE    ETH_CLOCK_GPIO0_IN // Clock configuration
 
-// Aptinex IsolPoE pin config — MUST be before #include <ETH.h>
-#define ETH_PHY_TYPE    ETH_PHY_LAN8720
-#define ETH_PHY_ADDR    1
-#define ETH_PHY_MDC     23
-#define ETH_PHY_MDIO    18
-#define ETH_PHY_POWER   17
-#define ETH_CLK_MODE    ETH_CLOCK_GPIO0_IN
-
+// Include the core Ethernet library
 #include <ETH.h>
-#include <NetworkClient.h>
+#include <WiFi.h> // Included to explicitly turn off WiFi
 
+// Flag to indicate when Ethernet is connected and has an IP
 static bool eth_connected = false;
 
+// Event handler function, called automatically on network events
 void onEvent(arduino_event_id_t event) {
   switch (event) {
     case ARDUINO_EVENT_ETH_START:
-      Serial.println("ETH Started");
-      ETH.setHostname("aptinex-test");
+      Serial.println("Ethernet Started");
+      // Set a hostname for DHCP
+      ETH.setHostname("aptinex-esp32-poe");
       break;
     case ARDUINO_EVENT_ETH_CONNECTED:
-      Serial.println("ETH Connected — assigning static IP");
-      ETH.config(IPAddress(192, 168, 0, 120),
-                 IPAddress(192, 168, 0, 1),
-                 IPAddress(255, 255, 255, 0),
-                 IPAddress(192, 168, 0, 1));
+      Serial.println("Ethernet Link Connected");
       break;
     case ARDUINO_EVENT_ETH_GOT_IP:
-      Serial.print("ETH Got IP: ");
+      // This is the key event: DHCP has successfully assigned an IP
+      Serial.print("Ethernet Got IP from DHCP: ");
       Serial.println(ETH.localIP());
       eth_connected = true;
       break;
     case ARDUINO_EVENT_ETH_LOST_IP:
-      Serial.println("ETH Lost IP");
+      Serial.println("Ethernet Lost IP");
       eth_connected = false;
       break;
     case ARDUINO_EVENT_ETH_DISCONNECTED:
-      Serial.println("ETH Disconnected");
+      Serial.println("Ethernet Disconnected");
       eth_connected = false;
       break;
     case ARDUINO_EVENT_ETH_STOP:
-      Serial.println("ETH Stopped");
+      Serial.println("Ethernet Stopped");
       eth_connected = false;
       break;
     default:
@@ -57,42 +57,48 @@ void onEvent(arduino_event_id_t event) {
 }
 
 void setup() {
+  // Initialize Serial for debugging
   Serial.begin(115200);
-  delay(2000);
-  Serial.println("\n\n=== Aptinex Official Approach ===");
-  Serial.printf("PHY_TYPE=%d ADDR=%d MDC=%d MDIO=%d POWER=%d CLK=%d\n",
-                ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
-                ETH_PHY_POWER, ETH_CLK_MODE);
+  // Small delay to allow Serial to stabilize, especially on some USB connections
+  delay(1000);
+  Serial.println();
+  Serial.println("Booting Aptinex IsolPoE ESP32...");
 
+  // 1. Disable WiFi Radio
+  // This ensures the device operates as a pure Ethernet client
+  WiFi.mode(WIFI_OFF);
+  Serial.println("WiFi Disabled.");
+
+  // 2. Register the network event handler
+  // This must be done before ETH.begin()
   Network.onEvent(onEvent);
+
+  // 3. Initialize Ethernet
+  // The ETH.begin() function uses the macros defined at the top.
+  // It will attempt to get an IP address via DHCP automatically.
+  // No static IP configuration is provided, so it acts as a DHCP client.
   ETH.begin();
-
-  Serial.println("ETH.begin() done, waiting...");
-}
-
-void testConnection() {
-  Serial.println("Connecting to 192.168.0.147:80...");
-  NetworkClient client;
-  if (client.connect(IPAddress(192, 168, 0, 147), 80)) {
-    Serial.println("TCP connect OK!");
-    client.stop();
-  } else {
-    Serial.println("TCP connect failed");
-  }
+  Serial.println("Ethernet initialization started. Requesting IP via DHCP...");
 }
 
 void loop() {
-  static unsigned long last = 0;
-  static bool tested = false;
-  if (millis() - last > 5000) {
-    last = millis();
-    Serial.printf("[%lus] connected=%d IP=%s MAC=%s\n",
-                  millis() / 1000, (int)eth_connected,
-                  ETH.localIP().toString().c_str(),
-                  ETH.macAddress().c_str());
-    if (eth_connected && !tested) {
-      tested = true;
-      testConnection();
+  // Your main code logic goes here.
+  // The eth_connected flag can be used to check if the network is ready.
+  if (eth_connected) {
+    // For example, you could print the IP every minute
+    static unsigned long lastPrint = 0;
+    if (millis() - lastPrint > 60000) { // Print every 60 seconds
+      lastPrint = millis();
+      Serial.print("Current IP Address: ");
+      Serial.println(ETH.localIP());
+    }
+  } else {
+    // Optionally handle the disconnected state
+    static unsigned long lastWarn = 0;
+    if (millis() - lastWarn > 10000) { // Warn every 10 seconds if not connected
+      lastWarn = millis();
+      Serial.println("Waiting for Ethernet link and DHCP...");
     }
   }
+  delay(100);
 }
