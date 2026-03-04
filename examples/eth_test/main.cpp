@@ -89,5 +89,5 @@ void loop() {
       Serial.println("Waiting for Ethernet link and DHCP...");
     }
   }
-  delay(100);
+  delay(1);  // yield to LWIP/system tasks without blocking long
 }
