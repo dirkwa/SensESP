@@ -354,7 +354,7 @@ public:
       client = NimBLEDevice::createClient();
     }
 
-    NimBLEAddress addr(mac.c_str());
+    NimBLEAddress addr(std::string(mac.c_str()), 0);
     if (!client->connect(addr)) {
       Serial.printf("GATT [%s] connect failed\n", session_id.c_str());
       handleConnectFailure();
