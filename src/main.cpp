@@ -43,7 +43,9 @@ extern "C" bool btInUse() { return true; }
 static constexpr const char* SK_SERVER_HOST = "192.168.0.122";
 static constexpr uint16_t SK_SERVER_PORT = 4000;
 static constexpr unsigned long POST_INTERVAL_MS = 2000;
-static constexpr const char* GATEWAY_HOSTNAME = "signalk-ble-gw";
+#ifndef GATEWAY_HOSTNAME
+#define GATEWAY_HOSTNAME "signalk-ble-gw"
+#endif
 static constexpr const char* SK_AUTH_TOKEN =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
     "eyJkZXZpY2UiOiJzaWduYWxrLWJsZS1ndyIsImlhdCI6MTc3MjYwNTM5M30."
@@ -225,15 +227,32 @@ static void send_advertisements() {
   http.begin(plugin_api_url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", String("Bearer ") + SK_AUTH_TOKEN);
-  http.setTimeout(5000);
+  http.setTimeout(3000);
 
   int code = http.POST(body);
   if (code == 200) {
-    Serial.printf("Forwarded %u device(s)\n", (unsigned)ads.size());
+    Serial.printf("POST: forwarded %u device(s), heap=%u\n",
+                  (unsigned)ads.size(), ESP.getFreeHeap());
   } else {
-    Serial.printf("POST failed: HTTP %d\n", code);
+    Serial.printf("POST failed: HTTP %d, heap=%u\n", code, ESP.getFreeHeap());
   }
   http.end();
+}
+
+// ---------------------------------------------------------------------------
+// HTTP POST background task (runs independently from main loop)
+// ---------------------------------------------------------------------------
+
+static void http_post_task(void* param) {
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(POST_INTERVAL_MS));
+    send_advertisements();
+    // Warn if memory is getting low
+    uint32_t heap = ESP.getFreeHeap();
+    if (heap < 20000) {
+      Serial.printf("WARNING: Low heap: %u bytes\n", heap);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -715,10 +734,13 @@ void setup() {
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(new BLEScanCallbacks(), true);
   scan->setActiveScan(false);
-  scan->setInterval(100);
-  scan->setWindow(99);
+  scan->setInterval(200);   // 200ms interval (was 100)
+  scan->setWindow(100);     // 100ms window → 50% duty cycle (was 99%)
   scan->setDuplicateFilter(0);
   scan->start(0);
+
+  // Start HTTP POST in a background task so it doesn't block ws.loop()
+  xTaskCreate(http_post_task, "http_post", 8192, NULL, 1, NULL);
 
   // Initialize WebSocket client
   String ws_path = "/plugins/bt-sensors-plugin-sk/gateway/ws?token=";
@@ -730,23 +752,16 @@ void setup() {
   Serial.println("BLE scanning started, waiting for Ethernet...");
 }
 
-static unsigned long last_post = 0;
 static unsigned long last_status = 0;
 
 void loop() {
   unsigned long now = millis();
 
-  // Service WebSocket
+  // Service WebSocket (must be called frequently — never block this loop)
   ws.loop();
 
   // Service GATT sessions (reconnects, periodic writes, poll reads)
   gatt_loop();
-
-  // Send advertisements via HTTP POST
-  if (now - last_post >= POST_INTERVAL_MS) {
-    last_post = now;
-    send_advertisements();
-  }
 
   // Send periodic status over WebSocket
   if (ws_connected && now - last_status >= STATUS_INTERVAL_MS) {
