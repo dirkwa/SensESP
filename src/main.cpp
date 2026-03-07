@@ -714,33 +714,43 @@ static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 
 void setup() {
   Serial.begin(115200);
-  delay(300);
+  delay(500);
   Serial.println();
-  Serial.println("Signal K BLE Gateway starting...");
+  Serial.printf("=== BLE Gateway %s ===\n", GATEWAY_HOSTNAME);
+  Serial.printf("Heap: %u bytes free\n", ESP.getFreeHeap());
+  Serial.printf("Flash: %u bytes, SDK: %s\n", ESP.getFlashChipSize(), ESP.getSdkVersion());
 
   // Enable 50MHz crystal oscillator before ETH init
+  Serial.println("Enabling oscillator...");
   pinMode(OSC_ENABLE_PIN, OUTPUT);
   digitalWrite(OSC_ENABLE_PIN, HIGH);
   delay(50);
 
+  Serial.println("Starting Ethernet...");
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
   ETH.begin();
+  Serial.printf("Heap after ETH: %u\n", ESP.getFreeHeap());
 
   ads_mutex = xSemaphoreCreateMutex();
 
   // Initialize NimBLE scanner
+  Serial.println("Starting NimBLE...");
   NimBLEDevice::init("");
+  Serial.printf("Heap after NimBLE: %u\n", ESP.getFreeHeap());
+
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(new BLEScanCallbacks(), true);
   scan->setActiveScan(false);
-  scan->setInterval(200);   // 200ms interval (was 100)
-  scan->setWindow(100);     // 100ms window → 50% duty cycle (was 99%)
+  scan->setInterval(200);   // 200ms interval
+  scan->setWindow(100);     // 100ms window → 50% duty cycle
   scan->setDuplicateFilter(0);
   scan->start(0);
+  Serial.println("BLE scan started");
 
   // Start HTTP POST in a background task so it doesn't block ws.loop()
   xTaskCreate(http_post_task, "http_post", 8192, NULL, 1, NULL);
+  Serial.println("HTTP POST task created");
 
   // Initialize WebSocket client
   String ws_path = "/plugins/bt-sensors-plugin-sk/gateway/ws?token=";
@@ -749,7 +759,7 @@ void setup() {
   ws.onEvent(webSocketEvent);
   ws.setReconnectInterval(5000);
 
-  Serial.println("BLE scanning started, waiting for Ethernet...");
+  Serial.printf("Setup complete! Heap: %u\n", ESP.getFreeHeap());
 }
 
 static unsigned long last_status = 0;
