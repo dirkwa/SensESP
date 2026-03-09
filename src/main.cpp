@@ -61,6 +61,8 @@ static constexpr const char* SK_WS_PATH_BASE =
 // Signal K access request paths (v1 — standard SK auth)
 static constexpr const char* SK_ACCESS_REQUEST_PATH =
     "/signalk/v1/access/requests";
+static constexpr const char* SK_LOGIN_STATUS_PATH =
+    "/skServer/loginStatus";
 
 static constexpr int MAX_GATT_SESSIONS = 3;
 static constexpr unsigned long STATUS_INTERVAL_MS = 30000;
@@ -79,14 +81,15 @@ static constexpr unsigned long AUTH_POLL_INTERVAL_MS = 5000;
 // ---------------------------------------------------------------------------
 
 enum class AuthState {
+  CHECK_SECURITY,   // GET /skServer/loginStatus — skip auth if not required
   LOAD_TOKEN,       // Try to load token from NVS
   REQUEST_ACCESS,   // POST /signalk/v1/access/requests
   POLLING,          // GET polling href, waiting for APPROVED
-  AUTHENTICATED,    // Have valid token — run normally
+  AUTHENTICATED,    // Have valid token (or security disabled)
   AUTH_DENIED       // Permanent failure
 };
 
-static AuthState auth_state = AuthState::LOAD_TOKEN;
+static AuthState auth_state = AuthState::CHECK_SECURITY;
 static String    sk_token;          // Current JWT (empty = not authenticated)
 static String    auth_poll_href;    // href returned by server for polling
 static unsigned long auth_last_poll = 0;
@@ -257,7 +260,7 @@ class BLEScanCallbacks : public NimBLEScanCallbacks {
 // ---------------------------------------------------------------------------
 
 static void send_advertisements() {
-  if (!eth_connected || sk_token.length() == 0) return;
+  if (!eth_connected) return;
 
   xSemaphoreTake(ads_mutex, portMAX_DELAY);
   if (pending_ads.empty()) {
@@ -304,11 +307,11 @@ static void send_advertisements() {
     Serial.printf("POST: forwarded %u device(s), heap=%u\n",
                   (unsigned)ads.size(), ESP.getFreeHeap());
   } else if (code == 401 || code == 403) {
-    Serial.printf("POST: auth rejected (HTTP %d) — clearing token\n", code);
+    Serial.printf("POST: auth rejected (HTTP %d) — clearing token, re-checking security\n", code);
     http.end();
     nvs_clear_token();
     sk_token = "";
-    auth_state = AuthState::REQUEST_ACCESS;
+    auth_state = AuthState::CHECK_SECURITY;
     return;
   } else {
     Serial.printf("POST failed: HTTP %d, heap=%u\n", code, ESP.getFreeHeap());
@@ -336,6 +339,35 @@ static void http_post_task(void* param) {
 // ---------------------------------------------------------------------------
 // Signal K access request flow
 // ---------------------------------------------------------------------------
+
+// GET /skServer/loginStatus → check if server requires authentication.
+// Returns true if auth is required, false if security is disabled.
+static bool check_security_required() {
+  String url = String("http://") + SK_SERVER_HOST + ":" +
+               String(SK_SERVER_PORT) + SK_LOGIN_STATUS_PATH;
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(5000);
+  int code = http.GET();
+  String resp = http.getString();
+  http.end();
+
+  if (code != 200) {
+    Serial.printf("Auth: loginStatus failed HTTP %d — assuming auth required\n", code);
+    return true;
+  }
+
+  JsonDocument doc;
+  if (deserializeJson(doc, resp) != DeserializationError::Ok) {
+    Serial.println("Auth: loginStatus parse error — assuming auth required");
+    return true;
+  }
+
+  bool required = doc["authenticationRequired"] | true;
+  Serial.printf("Auth: authenticationRequired=%s\n", required ? "true" : "false");
+  return required;
+}
 
 // POST /signalk/v1/access/requests → receive href to poll
 // Returns true if request submitted (or already pending), false on hard error.
@@ -455,6 +487,15 @@ static bool poll_access_request() {
 // Returns true when authenticated and ready to proceed.
 static bool auth_loop() {
   switch (auth_state) {
+    case AuthState::CHECK_SECURITY:
+      if (!check_security_required()) {
+        Serial.println("Auth: security disabled — proceeding without token");
+        auth_state = AuthState::AUTHENTICATED;
+      } else {
+        auth_state = AuthState::LOAD_TOKEN;
+      }
+      return false;
+
     case AuthState::LOAD_TOKEN:
       sk_token = nvs_load_token();
       if (sk_token.length() > 0) {
