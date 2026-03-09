@@ -3,18 +3,22 @@
  * @brief BLE-to-Ethernet gateway for Signal K
  *
  * Scans for BLE advertisements and forwards raw manufacturer data to the
- * bt-sensors-plugin-sk Signal K plugin over HTTP.  The plugin handles
- * device identification, decryption, parsing, and Signal K delta emission.
+ * Signal K server over HTTP.  The server handles device identification,
+ * decryption, parsing, and Signal K delta emission.
  *
  * Also maintains a WebSocket connection for GATT commands: the server can
  * instruct this gateway to connect to a BLE peripheral, subscribe to
  * notification characteristics, and stream the data back over the WebSocket.
  *
+ * Auth: Signal K access request flow — token stored in NVS (survives reboot).
+ * Source ID: MAC address + hostname sent in WebSocket hello message.
+ *
  * Standalone firmware — no SensESP framework.  Uses:
  * - Arduino ESP32 ETH for Ethernet (Aptinex IsolPoE board)
  * - NimBLE-Arduino for BLE scanning + GATT client
- * - HTTPClient + ArduinoJson for POSTing to the plugin API
+ * - HTTPClient + ArduinoJson for POSTing to the server API
  * - WebSocketsClient for bidirectional GATT command channel
+ * - Preferences (ESP32 NVS) for persisting the JWT token across reboots
  */
 
 #define ETH_PHY_TYPE    ETH_PHY_LAN8720
@@ -30,6 +34,7 @@
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
 #include <WebSocketsClient.h>
+#include <Preferences.h>
 
 #define OSC_ENABLE_PIN  17  // 50MHz crystal oscillator enable
 
@@ -46,22 +51,51 @@ static constexpr unsigned long POST_INTERVAL_MS = 2000;
 #ifndef GATEWAY_HOSTNAME
 #define GATEWAY_HOSTNAME "signalk-ble-gw"
 #endif
-static constexpr const char* SK_AUTH_TOKEN =
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJkZXZpY2UiOiJzaWduYWxrLWJsZS1ndyIsImlhdCI6MTc3MjYwNTM5M30."
-    "aHaJEHNuOV4-0ed11TaD0a-a1orEW8tdO9IhXhOvep0";
+
+// Server-side API paths (v2 — owned by server, not bt-sensors plugin)
+static constexpr const char* SK_ADV_PATH =
+    "/signalk/v2/api/ble/gateway/advertisements";
+static constexpr const char* SK_WS_PATH_BASE =
+    "/signalk/v2/api/ble/gateway/ws?token=";
+
+// Signal K access request paths (v1 — standard SK auth)
+static constexpr const char* SK_ACCESS_REQUEST_PATH =
+    "/signalk/v1/access/requests";
 
 static constexpr int MAX_GATT_SESSIONS = 3;
 static constexpr unsigned long STATUS_INTERVAL_MS = 30000;
 static constexpr unsigned long GATT_RECONNECT_DELAY_MS = 3000;
 static constexpr int GATT_MAX_RETRIES = 5;
 
+// NVS namespace and key for persisting the JWT token
+static constexpr const char* NVS_NAMESPACE = "ble_gw";
+static constexpr const char* NVS_TOKEN_KEY  = "sk_token";
+
+// Poll interval for access request approval
+static constexpr unsigned long AUTH_POLL_INTERVAL_MS = 5000;
+
+// ---------------------------------------------------------------------------
+// Auth state machine
+// ---------------------------------------------------------------------------
+
+enum class AuthState {
+  LOAD_TOKEN,       // Try to load token from NVS
+  REQUEST_ACCESS,   // POST /signalk/v1/access/requests
+  POLLING,          // GET polling href, waiting for APPROVED
+  AUTHENTICATED,    // Have valid token — run normally
+  AUTH_DENIED       // Permanent failure
+};
+
+static AuthState auth_state = AuthState::LOAD_TOKEN;
+static String    sk_token;          // Current JWT (empty = not authenticated)
+static String    auth_poll_href;    // href returned by server for polling
+static unsigned long auth_last_poll = 0;
+
 // ---------------------------------------------------------------------------
 // Ethernet state
 // ---------------------------------------------------------------------------
 
 static bool eth_connected = false;
-static String plugin_api_url;
 
 void onEvent(arduino_event_id_t event) {
   switch (event) {
@@ -76,30 +110,63 @@ void onEvent(arduino_event_id_t event) {
       Serial.print("Ethernet Got IP: ");
       Serial.println(ETH.localIP());
       eth_connected = true;
-      plugin_api_url = String("http://") + SK_SERVER_HOST + ":" +
-                       String(SK_SERVER_PORT) +
-                       "/plugins/bt-sensors-plugin-sk/gateway/advertisements";
-      Serial.print("Plugin URL: ");
-      Serial.println(plugin_api_url);
       break;
     case ARDUINO_EVENT_ETH_LOST_IP:
       Serial.println("Ethernet Lost IP");
       eth_connected = false;
-      plugin_api_url = "";
       break;
     case ARDUINO_EVENT_ETH_DISCONNECTED:
       Serial.println("Ethernet Disconnected");
       eth_connected = false;
-      plugin_api_url = "";
       break;
     case ARDUINO_EVENT_ETH_STOP:
       Serial.println("Ethernet Stopped");
       eth_connected = false;
-      plugin_api_url = "";
       break;
     default:
       break;
   }
+}
+
+// ---------------------------------------------------------------------------
+// NVS helpers
+// ---------------------------------------------------------------------------
+
+static Preferences prefs;
+
+static String nvs_load_token() {
+  prefs.begin(NVS_NAMESPACE, true); // read-only
+  String token = prefs.getString(NVS_TOKEN_KEY, "");
+  prefs.end();
+  return token;
+}
+
+static void nvs_save_token(const String& token) {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putString(NVS_TOKEN_KEY, token);
+  prefs.end();
+  Serial.println("Auth: token saved to NVS");
+}
+
+static void nvs_clear_token() {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.remove(NVS_TOKEN_KEY);
+  prefs.end();
+  Serial.println("Auth: NVS token cleared");
+}
+
+// ---------------------------------------------------------------------------
+// Source identification helpers
+// ---------------------------------------------------------------------------
+
+// Returns the Ethernet MAC address as "AA:BB:CC:DD:EE:FF"
+static String get_mac_address() {
+  return ETH.macAddress();
+}
+
+// Returns stable clientId for access requests: "ble-gw-<MAC>"
+static String get_client_id() {
+  return String("ble-gw-") + get_mac_address();
 }
 
 // ---------------------------------------------------------------------------
@@ -186,11 +253,11 @@ class BLEScanCallbacks : public NimBLEScanCallbacks {
 };
 
 // ---------------------------------------------------------------------------
-// HTTP POST to plugin (advertisements)
+// HTTP POST to server (advertisements)
 // ---------------------------------------------------------------------------
 
 static void send_advertisements() {
-  if (plugin_api_url.length() == 0) return;
+  if (!eth_connected || sk_token.length() == 0) return;
 
   xSemaphoreTake(ads_mutex, portMAX_DELAY);
   if (pending_ads.empty()) {
@@ -223,16 +290,26 @@ static void send_advertisements() {
   String body;
   serializeJson(doc, body);
 
+  String url = String("http://") + SK_SERVER_HOST + ":" +
+               String(SK_SERVER_PORT) + SK_ADV_PATH;
+
   HTTPClient http;
-  http.begin(plugin_api_url);
+  http.begin(url);
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + SK_AUTH_TOKEN);
+  http.addHeader("Authorization", String("Bearer ") + sk_token);
   http.setTimeout(3000);
 
   int code = http.POST(body);
   if (code == 200) {
     Serial.printf("POST: forwarded %u device(s), heap=%u\n",
                   (unsigned)ads.size(), ESP.getFreeHeap());
+  } else if (code == 401 || code == 403) {
+    Serial.printf("POST: auth rejected (HTTP %d) — clearing token\n", code);
+    http.end();
+    nvs_clear_token();
+    sk_token = "";
+    auth_state = AuthState::REQUEST_ACCESS;
+    return;
   } else {
     Serial.printf("POST failed: HTTP %d, heap=%u\n", code, ESP.getFreeHeap());
   }
@@ -246,13 +323,170 @@ static void send_advertisements() {
 static void http_post_task(void* param) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(POST_INTERVAL_MS));
-    send_advertisements();
-    // Warn if memory is getting low
+    if (auth_state == AuthState::AUTHENTICATED) {
+      send_advertisements();
+    }
     uint32_t heap = ESP.getFreeHeap();
     if (heap < 20000) {
       Serial.printf("WARNING: Low heap: %u bytes\n", heap);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Signal K access request flow
+// ---------------------------------------------------------------------------
+
+// POST /signalk/v1/access/requests → receive href to poll
+// Returns true if request submitted (or already pending), false on hard error.
+static bool submit_access_request() {
+  String clientId = get_client_id();
+  Serial.printf("Auth: submitting access request, clientId=%s\n", clientId.c_str());
+
+  JsonDocument req_doc;
+  req_doc["clientId"]    = clientId;
+  req_doc["description"] = String("BLE Gateway ") + GATEWAY_HOSTNAME;
+  req_doc["permissions"] = "readwrite";
+  String req_body;
+  serializeJson(req_doc, req_body);
+
+  String url = String("http://") + SK_SERVER_HOST + ":" +
+               String(SK_SERVER_PORT) + SK_ACCESS_REQUEST_PATH;
+
+  HTTPClient http;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(5000);
+
+  int code = http.POST(req_body);
+  String resp = http.getString();
+  http.end();
+
+  Serial.printf("Auth: access request response: HTTP %d: %s\n", code, resp.c_str());
+
+  if (code == 202 || code == 400) {
+    // 202 = new request accepted, 400 may mean request already pending
+    // In both cases, parse href from response body
+    JsonDocument resp_doc;
+    DeserializationError err = deserializeJson(resp_doc, resp);
+    if (err) {
+      Serial.printf("Auth: failed to parse response: %s\n", err.c_str());
+      return false;
+    }
+    const char* href = resp_doc["href"];
+    if (!href) {
+      // 400 with no href — genuine error
+      Serial.println("Auth: server rejected request (no href in response)");
+      return false;
+    }
+    auth_poll_href = String(href);
+    auth_state = AuthState::POLLING;
+    auth_last_poll = 0; // poll immediately
+    Serial.printf("Auth: polling href: %s\n", auth_poll_href.c_str());
+    return true;
+  }
+
+  Serial.printf("Auth: unexpected response: HTTP %d\n", code);
+  return false;
+}
+
+// Poll the access request href.
+// Returns true when done (APPROVED or DENIED), false while still pending.
+static bool poll_access_request() {
+  unsigned long now = millis();
+  if (now - auth_last_poll < AUTH_POLL_INTERVAL_MS) {
+    return false;
+  }
+  auth_last_poll = now;
+
+  String url = String("http://") + SK_SERVER_HOST + ":" +
+               String(SK_SERVER_PORT) + auth_poll_href;
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(5000);
+  int code = http.GET();
+  String resp = http.getString();
+  http.end();
+
+  if (code != 200) {
+    Serial.printf("Auth: poll failed: HTTP %d\n", code);
+    return false;
+  }
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, resp);
+  if (err) {
+    Serial.printf("Auth: poll parse error: %s\n", err.c_str());
+    return false;
+  }
+
+  const char* state = doc["state"];
+  if (!state) return false;
+
+  if (strcmp(state, "PENDING") == 0) {
+    Serial.println("Auth: waiting for admin approval...");
+    return false;
+  }
+
+  if (strcmp(state, "COMPLETED") == 0) {
+    const char* permission = doc["permission"];
+    if (permission && strcmp(permission, "APPROVED") == 0) {
+      const char* token = doc["token"];
+      if (token) {
+        sk_token = String(token);
+        nvs_save_token(sk_token);
+        auth_state = AuthState::AUTHENTICATED;
+        Serial.println("Auth: APPROVED — token saved, proceeding");
+        return true;
+      }
+    }
+    // DENIED or no token
+    Serial.printf("Auth: request completed with permission=%s — DENIED\n",
+                  permission ? permission : "null");
+    auth_state = AuthState::AUTH_DENIED;
+    return true;
+  }
+
+  return false;
+}
+
+// Run auth state machine — call this from loop() when eth_connected.
+// Returns true when authenticated and ready to proceed.
+static bool auth_loop() {
+  switch (auth_state) {
+    case AuthState::LOAD_TOKEN:
+      sk_token = nvs_load_token();
+      if (sk_token.length() > 0) {
+        Serial.println("Auth: loaded token from NVS");
+        auth_state = AuthState::AUTHENTICATED;
+      } else {
+        Serial.println("Auth: no stored token, requesting access");
+        auth_state = AuthState::REQUEST_ACCESS;
+      }
+      return false;
+
+    case AuthState::REQUEST_ACCESS:
+      if (submit_access_request()) {
+        return false; // submitted, now polling
+      }
+      // Retry after delay
+      delay(5000);
+      return false;
+
+    case AuthState::POLLING:
+      poll_access_request();
+      return false;
+
+    case AuthState::AUTHENTICATED:
+      return true;
+
+    case AuthState::AUTH_DENIED:
+      Serial.println("Auth: DENIED — halting. Please reset and request new access.");
+      delay(30000);
+      return false;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +834,7 @@ static void gatt_loop() {
 // ---------------------------------------------------------------------------
 
 static bool ws_connected = false;
+static bool ws_initialized = false;  // set after first authenticated WS connect
 
 static void ws_send_json(JsonDocument& doc) {
   if (!ws_connected) return;
@@ -610,23 +845,25 @@ static void ws_send_json(JsonDocument& doc) {
 
 static void send_hello() {
   JsonDocument doc;
-  doc["type"] = "hello";
-  doc["gateway_id"] = GATEWAY_HOSTNAME;
-  doc["firmware"] = "1.0.0";
-  doc["max_gatt_connections"] = MAX_GATT_SESSIONS;
+  doc["type"]                   = "hello";
+  doc["gateway_id"]             = GATEWAY_HOSTNAME;
+  doc["firmware"]               = "1.0.0";
+  doc["max_gatt_connections"]   = MAX_GATT_SESSIONS;
   doc["active_gatt_connections"] = activeGATTCount();
+  doc["mac"]                    = get_mac_address();
+  doc["hostname"]               = GATEWAY_HOSTNAME;
   ws_send_json(doc);
   Serial.println("WS: sent hello");
 }
 
 static void send_status() {
   JsonDocument doc;
-  doc["type"] = "status";
-  doc["gateway_id"] = GATEWAY_HOSTNAME;
-  doc["uptime"] = millis() / 1000;
-  doc["free_heap"] = ESP.getFreeHeap();
+  doc["type"]                   = "status";
+  doc["gateway_id"]             = GATEWAY_HOSTNAME;
+  doc["uptime"]                 = millis() / 1000;
+  doc["free_heap"]              = ESP.getFreeHeap();
   doc["active_gatt_connections"] = activeGATTCount();
-  doc["max_gatt_connections"] = MAX_GATT_SESSIONS;
+  doc["max_gatt_connections"]   = MAX_GATT_SESSIONS;
   ws_send_json(doc);
 }
 
@@ -709,6 +946,18 @@ static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
   }
 }
 
+// Initialize WebSocket with the current token.
+// Safe to call multiple times — ws.begin() reinitializes cleanly.
+static void init_websocket() {
+  String ws_path = String(SK_WS_PATH_BASE) + sk_token;
+  ws.begin(SK_SERVER_HOST, SK_SERVER_PORT, ws_path);
+  ws.onEvent(webSocketEvent);
+  ws.setReconnectInterval(5000);
+  ws_initialized = true;
+  Serial.printf("WS: connecting to %s:%u%s\n",
+                SK_SERVER_HOST, SK_SERVER_PORT, ws_path.c_str());
+}
+
 // ---------------------------------------------------------------------------
 // Arduino setup / loop
 // ---------------------------------------------------------------------------
@@ -753,14 +1002,8 @@ void setup() {
   xTaskCreate(http_post_task, "http_post", 8192, NULL, 1, NULL);
   Serial.println("HTTP POST task created");
 
-  // Initialize WebSocket client
-  String ws_path = "/plugins/bt-sensors-plugin-sk/gateway/ws?token=";
-  ws_path += SK_AUTH_TOKEN;
-  ws.begin(SK_SERVER_HOST, SK_SERVER_PORT, ws_path);
-  ws.onEvent(webSocketEvent);
-  ws.setReconnectInterval(5000);
-
   Serial.printf("Setup complete! Heap: %u\n", ESP.getFreeHeap());
+  // Auth and WebSocket init happen in loop() once Ethernet is up
 }
 
 static unsigned long last_status = 0;
@@ -768,8 +1011,24 @@ static unsigned long last_status = 0;
 void loop() {
   unsigned long now = millis();
 
+  if (!eth_connected) {
+    delay(100);
+    return;
+  }
+
+  // Run auth state machine
+  bool authenticated = auth_loop();
+
+  // Once authenticated, initialize WebSocket if not yet done
+  // (or reinitialize after token refresh)
+  if (authenticated && !ws_initialized) {
+    init_websocket();
+  }
+
   // Service WebSocket (must be called frequently — never block this loop)
-  ws.loop();
+  if (ws_initialized) {
+    ws.loop();
+  }
 
   // Service GATT sessions (reconnects, periodic writes, poll reads)
   gatt_loop();
