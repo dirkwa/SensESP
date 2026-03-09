@@ -222,22 +222,21 @@ static SemaphoreHandle_t ads_mutex;
 
 class BLEScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* device) override {
-    if (!device->haveManufacturerData()) return;
-
-    std::string mfr_raw = device->getManufacturerData();
-    const uint8_t* data = reinterpret_cast<const uint8_t*>(mfr_raw.data());
-    size_t len = mfr_raw.size();
-
-    if (len < 3) return;
-
-    uint16_t mfr_id = data[0] | (data[1] << 8);
-
     BleAdvertisement adv;
     adv.mac = device->getAddress().toString();
     adv.name = device->haveName() ? device->getName() : "";
     adv.rssi = device->getRSSI();
-    adv.mfr_id = mfr_id;
-    adv.mfr_data.assign(data + 2, data + len);
+    adv.mfr_id = 0;
+
+    if (device->haveManufacturerData()) {
+      std::string mfr_raw = device->getManufacturerData();
+      const uint8_t* data = reinterpret_cast<const uint8_t*>(mfr_raw.data());
+      size_t len = mfr_raw.size();
+      if (len >= 3) {
+        adv.mfr_id = data[0] | (data[1] << 8);
+        adv.mfr_data.assign(data + 2, data + len);
+      }
+    }
 
     xSemaphoreTake(ads_mutex, portMAX_DELAY);
 
@@ -286,8 +285,10 @@ static void send_advertisements() {
       dev["name"] = String(adv.name.c_str());
     }
 
-    JsonObject mfr = dev["manufacturer_data"].to<JsonObject>();
-    mfr[String(adv.mfr_id)] = bytes_to_hex(adv.mfr_data);
+    if (!adv.mfr_data.empty()) {
+      JsonObject mfr = dev["manufacturer_data"].to<JsonObject>();
+      mfr[String(adv.mfr_id)] = bytes_to_hex(adv.mfr_data);
+    }
   }
 
   String body;
