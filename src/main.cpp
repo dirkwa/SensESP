@@ -685,13 +685,14 @@ static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
     case WStype_DISCONNECTED:
       Serial.println("WS: disconnected");
       ws_connected = false;
-      // Don't close GATT sessions — they'll keep running and reconnect
-      // when the WebSocket comes back. The server will re-discover us.
       break;
 
     case WStype_CONNECTED:
       Serial.printf("WS: connected to %s\n", (char*)payload);
       ws_connected = true;
+      // Close any stale GATT sessions from a previous server session.
+      // The new server has no record of them and will re-subscribe fresh.
+      closeAllGATTSessions();
       send_hello();
       break;
 
