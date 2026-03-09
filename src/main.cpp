@@ -327,6 +327,14 @@ static void send_advertisements() {
 static void http_post_task(void* param) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(POST_INTERVAL_MS));
+
+    // Watchdog: restart scan if NimBLE stopped it (e.g. after GATT activity)
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    if (!scan->isScanning()) {
+      Serial.println("BLE scan stopped — restarting");
+      scan->start(0);
+    }
+
     if (auth_state == AuthState::AUTHENTICATED) {
       send_advertisements();
     }
