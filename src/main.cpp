@@ -994,11 +994,11 @@ static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
         Serial.println("WS: token rejected by server — clearing token, re-auth");
         nvs_clear_token();
         sk_token = "";
-        ws_initialized = false;
         auth_state = AuthState::CHECK_SECURITY;
       } else {
         Serial.println("WS: disconnected");
       }
+      ws_initialized = false;
       ws_connected = false;
       break;
     }
