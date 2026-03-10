@@ -312,6 +312,8 @@ static void send_advertisements() {
     http.end();
     nvs_clear_token();
     sk_token = "";
+    ws_initialized = false;  // force WS reconnect with new token after re-auth
+    ws.disconnect();
     auth_state = AuthState::CHECK_SECURITY;
     return;
   } else {
@@ -969,10 +971,25 @@ static void handle_ws_message(uint8_t* payload, size_t length) {
 
 static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
-    case WStype_DISCONNECTED:
-      Serial.println("WS: disconnected");
+    case WStype_DISCONNECTED: {
+      // WebSocketsClient passes the WS close code as a uint16 in payload
+      // when length == 2.  A 4401 close means the server rejected our token.
+      uint16_t close_code = 0;
+      if (length == 2 && payload) {
+        close_code = (payload[0] << 8) | payload[1];
+      }
+      if (close_code == 4401) {
+        Serial.println("WS: token rejected by server — clearing token, re-auth");
+        nvs_clear_token();
+        sk_token = "";
+        ws_initialized = false;
+        auth_state = AuthState::CHECK_SECURITY;
+      } else {
+        Serial.println("WS: disconnected");
+      }
       ws_connected = false;
       break;
+    }
 
     case WStype_CONNECTED:
       Serial.printf("WS: connected to %s\n", (char*)payload);
