@@ -547,6 +547,7 @@ static bool auth_loop() {
 
 class GATTSession;
 static WebSocketsClient ws;
+static bool ws_initialized = false;
 static void ws_send_json(JsonDocument& doc);
 
 struct PollEntry {
@@ -886,7 +887,6 @@ static void gatt_loop() {
 // ---------------------------------------------------------------------------
 
 static bool ws_connected = false;
-static bool ws_initialized = false;  // set after first authenticated WS connect
 
 static void ws_send_json(JsonDocument& doc) {
   if (!ws_connected) return;
