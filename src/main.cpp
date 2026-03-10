@@ -486,9 +486,10 @@ static bool poll_access_request() {
   }
 
   if (strcmp(state, "COMPLETED") == 0) {
-    const char* permission = doc["permission"];
+    // Token is nested: { "accessRequest": { "permission": "APPROVED", "token": "..." } }
+    const char* permission = doc["accessRequest"]["permission"];
     if (permission && strcmp(permission, "APPROVED") == 0) {
-      const char* token = doc["token"];
+      const char* token = doc["accessRequest"]["token"];
       if (token) {
         sk_token = String(token);
         nvs_save_token(sk_token);
