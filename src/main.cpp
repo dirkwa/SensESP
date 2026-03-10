@@ -255,6 +255,13 @@ class BLEScanCallbacks : public NimBLEScanCallbacks {
 };
 
 // ---------------------------------------------------------------------------
+// WebSocket client (declared here so send_advertisements can reference them)
+// ---------------------------------------------------------------------------
+
+static WebSocketsClient ws;
+static bool ws_initialized = false;
+
+// ---------------------------------------------------------------------------
 // HTTP POST to server (advertisements)
 // ---------------------------------------------------------------------------
 
@@ -546,8 +553,6 @@ static bool auth_loop() {
 // ---------------------------------------------------------------------------
 
 class GATTSession;
-static WebSocketsClient ws;
-static bool ws_initialized = false;
 static void ws_send_json(JsonDocument& doc);
 
 struct PollEntry {
