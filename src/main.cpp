@@ -461,6 +461,12 @@ static bool poll_access_request() {
 
   if (code != 200) {
     Serial.printf("Auth: poll failed: HTTP %d\n", code);
+    if (code == 404 || code == 500) {
+      // Request no longer exists (server restarted) — submit a new one
+      Serial.println("Auth: stale poll href, re-submitting access request");
+      auth_poll_href = "";
+      auth_state = AuthState::REQUEST_ACCESS;
+    }
     return false;
   }
 
