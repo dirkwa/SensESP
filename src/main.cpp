@@ -35,6 +35,7 @@
 #include <NimBLEDevice.h>
 #include <WebSocketsClient.h>
 #include <Preferences.h>
+#include "esp_log.h"
 
 #define OSC_ENABLE_PIN  17  // 50MHz crystal oscillator enable
 
@@ -1066,6 +1067,7 @@ void setup() {
   // Initialize NimBLE scanner
   Serial.println("Starting NimBLE...");
   NimBLEDevice::init("");
+  esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
   Serial.printf("Heap after NimBLE: %u\n", ESP.getFreeHeap());
 
   NimBLEScan* scan = NimBLEDevice::getScan();
