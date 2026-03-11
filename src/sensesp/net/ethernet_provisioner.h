@@ -29,13 +29,20 @@ struct EthernetConfig {
   IPAddress netmask = IPAddress(255, 255, 255, 0);
   IPAddress dns = IPAddress(0, 0, 0, 0);  // 0.0.0.0 = use DHCP-provided DNS
 
+  // Extra delay (ms) before PHY init. Use for PoE boards where the PD power
+  // delivery negotiation completes after the ESP32 has already started booting.
+  // Leave at 0 for USB-powered or wall-wart boards.
+  unsigned int poe_stabilize_ms = 0;
+
   // Board presets
   static EthernetConfig olimex_esp32_poe_iso() {
     // GPIO12 controls 3.3V power to the isolated PHY section via FETs.
     // The provisioner handles the power-on manually with a proper delay,
     // then passes power=-1 to ETH.begin() to skip the driver's too-fast
     // reset-style toggle.
-    return {ETH_PHY_LAN8720, 0, 23, 18, 12, ETH_CLOCK_GPIO17_OUT};
+    EthernetConfig c{ETH_PHY_LAN8720, 0, 23, 18, 12, ETH_CLOCK_GPIO17_OUT};
+    c.poe_stabilize_ms = 1000;
+    return c;
   }
   static EthernetConfig olimex_esp32_gateway() {
     return {ETH_PHY_LAN8720, 0, 23, 18, 5, ETH_CLOCK_GPIO17_OUT};
@@ -48,7 +55,9 @@ struct EthernetConfig {
   }
   static EthernetConfig aptinex_isolpoe() {
     // External 50 MHz crystal oscillator on GPIO0; PHY power on GPIO17.
-    return {ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
+    EthernetConfig c{ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
+    c.poe_stabilize_ms = 1000;
+    return c;
   }
 };
 
@@ -82,9 +91,13 @@ class EthernetProvisioner {
   explicit EthernetProvisioner(const EthernetConfig& config) {
     String hostname = SensESPBaseApp::get_hostname();
 
-    // After a cold power-on (PoE PD), the switch-side power delivery
-    // negotiation can take 100–500 ms. Give it time before touching the PHY.
-    delay(1000);
+    // On PoE boards, the switch-side power delivery negotiation can complete
+    // after the ESP32 has already started booting. Wait before touching the PHY.
+    if (config.poe_stabilize_ms > 0) {
+      ESP_LOGI(__FILENAME__, "Waiting %ums for PoE power to stabilize",
+               config.poe_stabilize_ms);
+      delay(config.poe_stabilize_ms);
+    }
 
     ESP_LOGI(__FILENAME__,
              "Initializing Ethernet (PHY type=%d, addr=%d, MDC=%d, MDIO=%d, "
