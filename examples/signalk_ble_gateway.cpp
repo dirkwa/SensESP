@@ -208,7 +208,7 @@ void setup() {
   NimBLEDevice::init("");
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(new BLEScanCallbacks(), true);  // wantDuplicates
-  scan->setActiveScan(true);    // active scan to get scan responses (device names)
+  scan->setActiveScan(false);   // passive scan; names must be in primary ADV packet
   scan->setInterval(100);       // scan interval (ms)
   scan->setWindow(99);          // scan window (ms), <= interval
   scan->setDuplicateFilter(0);  // 0 = report duplicates
