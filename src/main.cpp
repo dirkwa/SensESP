@@ -1,6 +1,6 @@
 /**
  * @file main.cpp
- * @brief BLE-to-Ethernet gateway for Signal K
+ * @brief BLE-to-Ethernet gateway for Signal K (SensESP-based)
  *
  * Scans for BLE advertisements and forwards raw manufacturer data to the
  * Signal K server over HTTP.  The server handles device identification,
@@ -10,34 +10,25 @@
  * instruct this gateway to connect to a BLE peripheral, subscribe to
  * notification characteristics, and stream the data back over the WebSocket.
  *
- * Auth: Signal K access request flow — token stored in NVS (survives reboot).
- * Source ID: MAC address + hostname sent in WebSocket hello message.
+ * Uses SensESP framework for:
+ * - Ethernet initialization (EthernetProvisioner with Aptinex IsolPoE board)
+ * - Signal K server discovery (mDNS) and web configuration UI
+ * - Token-based authentication (SKWSClient handles access request flow)
+ * - OTA firmware updates
  *
- * Standalone firmware — no SensESP framework.  Uses:
- * - Arduino ESP32 ETH for Ethernet (Aptinex IsolPoE board)
- * - NimBLE-Arduino for BLE scanning + GATT client
- * - HTTPClient + ArduinoJson for POSTing to the server API
- * - WebSocketsClient for bidirectional GATT command channel
- * - Preferences (ESP32 NVS) for persisting the JWT token across reboots
+ * BLE-specific connections (HTTP POST for advertisements, WebSocket for GATT
+ * commands) run alongside SKWSClient using the same server address and token.
  */
 
-#define ETH_PHY_TYPE    ETH_PHY_LAN8720
-#define ETH_PHY_ADDR    1
-#define ETH_PHY_MDC     23
-#define ETH_PHY_MDIO    18
-#define ETH_PHY_POWER   -1                // Don't let driver touch GPIO17
-#define ETH_CLK_MODE    ETH_CLOCK_GPIO0_IN
-
-#include <ETH.h>
-#include <WiFi.h>
 #include <HTTPClient.h>
-#include <ArduinoJson.h>
 #include <NimBLEDevice.h>
-#include <WebSocketsClient.h>
-#include <Preferences.h>
-#include "esp_log.h"
+#include <esp_websocket_client.h>
 
-#define OSC_ENABLE_PIN  17  // 50MHz crystal oscillator enable
+#include "sensesp/net/ethernet_provisioner.h"
+#include "sensesp/system/lambda_consumer.h"
+#include "sensesp_app_builder.h"
+
+using namespace sensesp;
 
 // Keep BT memory — NimBLE needs it but Arduino doesn't detect external lib
 extern "C" bool btInUse() { return true; }
@@ -46,12 +37,7 @@ extern "C" bool btInUse() { return true; }
 // Configuration
 // ---------------------------------------------------------------------------
 
-static constexpr const char* SK_SERVER_HOST = "192.168.0.122";
-static constexpr uint16_t SK_SERVER_PORT = 4000;
 static constexpr unsigned long POST_INTERVAL_MS = 2000;
-#ifndef GATEWAY_HOSTNAME
-#define GATEWAY_HOSTNAME "signalk-ble-gw"
-#endif
 
 // Server-side API paths (v2 — owned by server, not bt-sensors plugin)
 static constexpr const char* SK_ADV_PATH =
@@ -59,119 +45,16 @@ static constexpr const char* SK_ADV_PATH =
 static constexpr const char* SK_WS_PATH_BASE =
     "/signalk/v2/api/ble/gateway/ws?token=";
 
-// Signal K access request paths (v1 — standard SK auth)
-static constexpr const char* SK_ACCESS_REQUEST_PATH =
-    "/signalk/v1/access/requests";
-static constexpr const char* SK_LOGIN_STATUS_PATH =
-    "/skServer/loginStatus";
-
 static constexpr int MAX_GATT_SESSIONS = 3;
 static constexpr unsigned long STATUS_INTERVAL_MS = 30000;
 static constexpr unsigned long GATT_RECONNECT_DELAY_MS = 3000;
 static constexpr int GATT_MAX_RETRIES = 5;
 
-// NVS namespace and key for persisting the JWT token
-static constexpr const char* NVS_NAMESPACE = "ble_gw";
-static constexpr const char* NVS_TOKEN_KEY  = "sk_token";
-
-// Poll interval for access request approval
-static constexpr unsigned long AUTH_POLL_INTERVAL_MS = 5000;
-
 // ---------------------------------------------------------------------------
-// Auth state machine
+// SensESP app reference — provides server address, token, event loop
 // ---------------------------------------------------------------------------
 
-enum class AuthState {
-  CHECK_SECURITY,   // GET /skServer/loginStatus — skip auth if not required
-  LOAD_TOKEN,       // Try to load token from NVS
-  REQUEST_ACCESS,   // POST /signalk/v1/access/requests
-  POLLING,          // GET polling href, waiting for APPROVED
-  AUTHENTICATED,    // Have valid token (or security disabled)
-  AUTH_DENIED       // Permanent failure
-};
-
-static AuthState auth_state = AuthState::CHECK_SECURITY;
-static String    sk_token;          // Current JWT (empty = not authenticated)
-static String    auth_poll_href;    // href returned by server for polling
-static unsigned long auth_last_poll = 0;
-
-// ---------------------------------------------------------------------------
-// Ethernet state
-// ---------------------------------------------------------------------------
-
-static bool eth_connected = false;
-
-void onEvent(arduino_event_id_t event) {
-  switch (event) {
-    case ARDUINO_EVENT_ETH_START:
-      Serial.println("Ethernet Started");
-      ETH.setHostname(GATEWAY_HOSTNAME);
-      break;
-    case ARDUINO_EVENT_ETH_CONNECTED:
-      Serial.println("Ethernet Link Connected");
-      break;
-    case ARDUINO_EVENT_ETH_GOT_IP:
-      Serial.print("Ethernet Got IP: ");
-      Serial.println(ETH.localIP());
-      eth_connected = true;
-      break;
-    case ARDUINO_EVENT_ETH_LOST_IP:
-      Serial.println("Ethernet Lost IP");
-      eth_connected = false;
-      break;
-    case ARDUINO_EVENT_ETH_DISCONNECTED:
-      Serial.println("Ethernet Disconnected");
-      eth_connected = false;
-      break;
-    case ARDUINO_EVENT_ETH_STOP:
-      Serial.println("Ethernet Stopped");
-      eth_connected = false;
-      break;
-    default:
-      break;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// NVS helpers
-// ---------------------------------------------------------------------------
-
-static Preferences prefs;
-
-static String nvs_load_token() {
-  prefs.begin(NVS_NAMESPACE, true); // read-only
-  String token = prefs.getString(NVS_TOKEN_KEY, "");
-  prefs.end();
-  return token;
-}
-
-static void nvs_save_token(const String& token) {
-  prefs.begin(NVS_NAMESPACE, false);
-  prefs.putString(NVS_TOKEN_KEY, token);
-  prefs.end();
-  Serial.println("Auth: token saved to NVS");
-}
-
-static void nvs_clear_token() {
-  prefs.begin(NVS_NAMESPACE, false);
-  prefs.remove(NVS_TOKEN_KEY);
-  prefs.end();
-  Serial.println("Auth: NVS token cleared");
-}
-
-// ---------------------------------------------------------------------------
-// Source identification helpers
-// ---------------------------------------------------------------------------
-
-// Returns the Ethernet MAC address as "AA:BB:CC:DD:EE:FF"
-static String get_mac_address() {
-  return ETH.macAddress();
-}
-
-// Returns stable clientId for access requests: "ble-gw-<MAC>"
-static String get_client_id() {
-  return String("ble-gw-") + get_mac_address();
-}
+static std::shared_ptr<SKWSClient> sk_ws_client;
 
 // ---------------------------------------------------------------------------
 // Utility: hex conversions
@@ -256,18 +139,106 @@ class BLEScanCallbacks : public NimBLEScanCallbacks {
 };
 
 // ---------------------------------------------------------------------------
-// WebSocket client (declared here so send_advertisements can reference them)
+// Custom WebSocket for BLE GATT commands (separate from SKWSClient)
 // ---------------------------------------------------------------------------
 
-static WebSocketsClient ws;
-static bool ws_initialized = false;
+static esp_websocket_client_handle_t ble_ws_client = nullptr;
+static bool ble_ws_connected = false;
+
+// Forward declarations
+static void ws_send_json(JsonDocument& doc);
+static void handle_ws_message(uint8_t* payload, size_t length);
+static void send_hello();
+static void closeAllGATTSessions();
+
+static void ble_ws_event_handler(void* handler_args, esp_event_base_t base,
+                                  int32_t event_id, void* event_data) {
+  esp_websocket_event_data_t* data = (esp_websocket_event_data_t*)event_data;
+  switch (event_id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+      ESP_LOGI("BLE-WS", "Connected");
+      ble_ws_connected = true;
+      closeAllGATTSessions();
+      send_hello();
+      break;
+    case WEBSOCKET_EVENT_DISCONNECTED:
+      ESP_LOGI("BLE-WS", "Disconnected");
+      ble_ws_connected = false;
+      break;
+    case WEBSOCKET_EVENT_DATA:
+      if (data->op_code == 0x01 && data->data_len > 0) {
+        handle_ws_message((uint8_t*)data->data_ptr, data->data_len);
+      }
+      break;
+    case WEBSOCKET_EVENT_ERROR:
+      ESP_LOGW("BLE-WS", "Error");
+      ble_ws_connected = false;
+      break;
+    default:
+      break;
+  }
+}
+
+static void destroy_custom_websocket() {
+  if (ble_ws_client) {
+    esp_websocket_client_stop(ble_ws_client);
+    esp_websocket_client_destroy(ble_ws_client);
+    ble_ws_client = nullptr;
+  }
+  ble_ws_connected = false;
+}
+
+static void init_custom_websocket() {
+  destroy_custom_websocket();
+
+  if (!sk_ws_client) return;
+
+  String token = sk_ws_client->get_auth_token();
+  String addr = sk_ws_client->get_server_address();
+  uint16_t port = sk_ws_client->get_server_port();
+
+  if (addr.isEmpty()) return;
+
+  String url = String("ws://") + addr + ":" + String(port) +
+               SK_WS_PATH_BASE + token;
+
+  ESP_LOGI("BLE-WS", "Connecting to %s", url.c_str());
+
+  esp_websocket_client_config_t config = {};
+  config.uri = url.c_str();
+  config.task_stack = 4096;
+  config.buffer_size = 1024;
+
+  ble_ws_client = esp_websocket_client_init(&config);
+  if (!ble_ws_client) {
+    ESP_LOGE("BLE-WS", "Failed to init WebSocket client");
+    return;
+  }
+  esp_websocket_register_events(ble_ws_client, WEBSOCKET_EVENT_ANY,
+                                ble_ws_event_handler, nullptr);
+  esp_websocket_client_start(ble_ws_client);
+}
+
+static void ws_send_json(JsonDocument& doc) {
+  if (!ble_ws_connected || !ble_ws_client) return;
+  String msg;
+  serializeJson(doc, msg);
+  esp_websocket_client_send_text(ble_ws_client, msg.c_str(), msg.length(),
+                                  portMAX_DELAY);
+}
 
 // ---------------------------------------------------------------------------
 // HTTP POST to server (advertisements)
 // ---------------------------------------------------------------------------
 
 static void send_advertisements() {
-  if (!eth_connected) return;
+  if (!sk_ws_client || !sk_ws_client->is_connected()) return;
+
+  String token = sk_ws_client->get_auth_token();
+  String addr = sk_ws_client->get_server_address();
+  uint16_t port = sk_ws_client->get_server_port();
+
+  if (addr.isEmpty()) return;
 
   xSemaphoreTake(ads_mutex, portMAX_DELAY);
   if (pending_ads.empty()) {
@@ -279,7 +250,7 @@ static void send_advertisements() {
   xSemaphoreGive(ads_mutex);
 
   JsonDocument doc;
-  doc["gateway_id"] = GATEWAY_HOSTNAME;
+  doc["gateway_id"] = SensESPBaseApp::get_hostname();
 
   JsonArray devices = doc["devices"].to<JsonArray>();
   for (const auto& adv : ads) {
@@ -302,30 +273,25 @@ static void send_advertisements() {
   String body;
   serializeJson(doc, body);
 
-  String url = String("http://") + SK_SERVER_HOST + ":" +
-               String(SK_SERVER_PORT) + SK_ADV_PATH;
+  String url = String("http://") + addr + ":" + String(port) + SK_ADV_PATH;
 
   HTTPClient http;
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + sk_token);
+  http.addHeader("Authorization", String("Bearer ") + token);
   http.setTimeout(3000);
 
   int code = http.POST(body);
   if (code == 200) {
-    Serial.printf("POST: forwarded %u device(s), heap=%u\n",
-                  (unsigned)ads.size(), ESP.getFreeHeap());
+    ESP_LOGI("BLE-GW", "POST: forwarded %u device(s), heap=%u",
+             (unsigned)ads.size(), ESP.getFreeHeap());
   } else if (code == 401 || code == 403) {
-    Serial.printf("POST: auth rejected (HTTP %d) — clearing token, re-checking security\n", code);
+    ESP_LOGW("BLE-GW", "POST: auth rejected (HTTP %d) — restarting SK connection", code);
     http.end();
-    nvs_clear_token();
-    sk_token = "";
-    ws_initialized = false;  // force WS reconnect with new token after re-auth
-    ws.disconnect();
-    auth_state = AuthState::CHECK_SECURITY;
+    sk_ws_client->restart();
     return;
   } else {
-    Serial.printf("POST failed: HTTP %d, heap=%u\n", code, ESP.getFreeHeap());
+    ESP_LOGW("BLE-GW", "POST failed: HTTP %d, heap=%u", code, ESP.getFreeHeap());
   }
   http.end();
 }
@@ -341,227 +307,24 @@ static void http_post_task(void* param) {
     // Watchdog: restart scan if NimBLE stopped it (e.g. after GATT activity)
     NimBLEScan* scan = NimBLEDevice::getScan();
     if (!scan->isScanning()) {
-      Serial.println("BLE scan stopped — restarting");
+      ESP_LOGI("BLE-GW", "BLE scan stopped — restarting");
       scan->start(0);
     }
 
-    if (auth_state == AuthState::AUTHENTICATED) {
+    if (sk_ws_client && sk_ws_client->is_connected()) {
       send_advertisements();
     }
+
     uint32_t heap = ESP.getFreeHeap();
     if (heap < 20000) {
-      Serial.printf("WARNING: Low heap: %u bytes\n", heap);
+      ESP_LOGW("BLE-GW", "Low heap: %u bytes", heap);
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Signal K access request flow
-// ---------------------------------------------------------------------------
-
-// GET /skServer/loginStatus → check if server requires authentication.
-// Returns true if auth is required, false if security is disabled.
-static bool check_security_required() {
-  String url = String("http://") + SK_SERVER_HOST + ":" +
-               String(SK_SERVER_PORT) + SK_LOGIN_STATUS_PATH;
-
-  HTTPClient http;
-  http.begin(url);
-  http.setTimeout(5000);
-  int code = http.GET();
-  String resp = http.getString();
-  http.end();
-
-  if (code != 200) {
-    Serial.printf("Auth: loginStatus failed HTTP %d — assuming auth required\n", code);
-    return true;
-  }
-
-  JsonDocument doc;
-  if (deserializeJson(doc, resp) != DeserializationError::Ok) {
-    Serial.println("Auth: loginStatus parse error — assuming auth required");
-    return true;
-  }
-
-  bool required = doc["authenticationRequired"] | true;
-  Serial.printf("Auth: authenticationRequired=%s\n", required ? "true" : "false");
-  return required;
-}
-
-// POST /signalk/v1/access/requests → receive href to poll
-// Returns true if request submitted (or already pending), false on hard error.
-static bool submit_access_request() {
-  String clientId = get_client_id();
-  Serial.printf("Auth: submitting access request, clientId=%s\n", clientId.c_str());
-
-  JsonDocument req_doc;
-  req_doc["clientId"]    = clientId;
-  req_doc["description"] = String("BLE Gateway ") + GATEWAY_HOSTNAME;
-  req_doc["permissions"] = "readwrite";
-  String req_body;
-  serializeJson(req_doc, req_body);
-
-  String url = String("http://") + SK_SERVER_HOST + ":" +
-               String(SK_SERVER_PORT) + SK_ACCESS_REQUEST_PATH;
-
-  HTTPClient http;
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(5000);
-
-  int code = http.POST(req_body);
-  String resp = http.getString();
-  http.end();
-
-  Serial.printf("Auth: access request response: HTTP %d: %s\n", code, resp.c_str());
-
-  if (code == 202 || code == 400) {
-    // 202 = new request accepted, 400 may mean request already pending
-    // In both cases, parse href from response body
-    JsonDocument resp_doc;
-    DeserializationError err = deserializeJson(resp_doc, resp);
-    if (err) {
-      Serial.printf("Auth: failed to parse response: %s\n", err.c_str());
-      return false;
-    }
-    const char* href = resp_doc["href"];
-    if (!href) {
-      // 400 with no href — genuine error
-      Serial.println("Auth: server rejected request (no href in response)");
-      return false;
-    }
-    auth_poll_href = String(href);
-    auth_state = AuthState::POLLING;
-    auth_last_poll = 0; // poll immediately
-    Serial.printf("Auth: polling href: %s\n", auth_poll_href.c_str());
-    return true;
-  }
-
-  Serial.printf("Auth: unexpected response: HTTP %d\n", code);
-  return false;
-}
-
-// Poll the access request href.
-// Returns true when done (APPROVED or DENIED), false while still pending.
-static bool poll_access_request() {
-  unsigned long now = millis();
-  if (now - auth_last_poll < AUTH_POLL_INTERVAL_MS) {
-    return false;
-  }
-  auth_last_poll = now;
-
-  String url = String("http://") + SK_SERVER_HOST + ":" +
-               String(SK_SERVER_PORT) + auth_poll_href;
-
-  HTTPClient http;
-  http.begin(url);
-  http.setTimeout(5000);
-  int code = http.GET();
-  String resp = http.getString();
-  http.end();
-
-  if (code != 200) {
-    Serial.printf("Auth: poll failed: HTTP %d\n", code);
-    if (code == 404 || code == 500) {
-      // Request no longer exists (server restarted) — submit a new one
-      Serial.println("Auth: stale poll href, re-submitting access request");
-      auth_poll_href = "";
-      auth_state = AuthState::REQUEST_ACCESS;
-    }
-    return false;
-  }
-
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, resp);
-  if (err) {
-    Serial.printf("Auth: poll parse error: %s\n", err.c_str());
-    return false;
-  }
-
-  const char* state = doc["state"];
-  if (!state) return false;
-
-  if (strcmp(state, "PENDING") == 0) {
-    Serial.println("Auth: waiting for admin approval...");
-    return false;
-  }
-
-  if (strcmp(state, "COMPLETED") == 0) {
-    // Token is nested: { "accessRequest": { "permission": "APPROVED", "token": "..." } }
-    const char* permission = doc["accessRequest"]["permission"];
-    if (permission && strcmp(permission, "APPROVED") == 0) {
-      const char* token = doc["accessRequest"]["token"];
-      if (token) {
-        sk_token = String(token);
-        nvs_save_token(sk_token);
-        auth_state = AuthState::AUTHENTICATED;
-        Serial.println("Auth: APPROVED — token saved, proceeding");
-        return true;
-      }
-    }
-    // DENIED or no token
-    Serial.printf("Auth: request completed with permission=%s — DENIED\n",
-                  permission ? permission : "null");
-    auth_state = AuthState::AUTH_DENIED;
-    return true;
-  }
-
-  return false;
-}
-
-// Run auth state machine — call this from loop() when eth_connected.
-// Returns true when authenticated and ready to proceed.
-static bool auth_loop() {
-  switch (auth_state) {
-    case AuthState::CHECK_SECURITY:
-      if (!check_security_required()) {
-        Serial.println("Auth: security disabled — proceeding without token");
-        auth_state = AuthState::AUTHENTICATED;
-      } else {
-        auth_state = AuthState::LOAD_TOKEN;
-      }
-      return false;
-
-    case AuthState::LOAD_TOKEN:
-      sk_token = nvs_load_token();
-      if (sk_token.length() > 0) {
-        Serial.println("Auth: loaded token from NVS");
-        auth_state = AuthState::AUTHENTICATED;
-      } else {
-        Serial.println("Auth: no stored token, requesting access");
-        auth_state = AuthState::REQUEST_ACCESS;
-      }
-      return false;
-
-    case AuthState::REQUEST_ACCESS:
-      if (submit_access_request()) {
-        return false; // submitted, now polling
-      }
-      // Retry after delay
-      delay(5000);
-      return false;
-
-    case AuthState::POLLING:
-      poll_access_request();
-      return false;
-
-    case AuthState::AUTHENTICATED:
-      return true;
-
-    case AuthState::AUTH_DENIED:
-      Serial.println("Auth: DENIED — halting. Please reset and request new access.");
-      delay(30000);
-      return false;
-  }
-  return false;
 }
 
 // ---------------------------------------------------------------------------
 // GATT Session — manages one BLE connection to a peripheral
 // ---------------------------------------------------------------------------
-
-class GATTSession;
-static void ws_send_json(JsonDocument& doc);
 
 struct PollEntry {
   String uuid;
@@ -614,7 +377,6 @@ public:
     mac = cmd["mac"].as<String>();
     service_uuid = cmd["service"].as<String>();
 
-    // Parse notify UUIDs
     notify_uuids.clear();
     if (cmd["notify"].is<JsonArray>()) {
       for (JsonVariant v : cmd["notify"].as<JsonArray>()) {
@@ -622,7 +384,6 @@ public:
       }
     }
 
-    // Parse init writes
     init_writes.clear();
     if (cmd["init"].is<JsonArray>()) {
       for (JsonObject iw : cmd["init"].as<JsonArray>()) {
@@ -634,7 +395,6 @@ public:
       }
     }
 
-    // Parse poll entries
     poll_entries.clear();
     if (cmd["poll"].is<JsonArray>()) {
       for (JsonObject pe : cmd["poll"].as<JsonArray>()) {
@@ -646,7 +406,6 @@ public:
       }
     }
 
-    // Parse periodic writes
     periodic_writes.clear();
     if (cmd["periodic_write"].is<JsonArray>()) {
       for (JsonObject pw : cmd["periodic_write"].as<JsonArray>()) {
@@ -666,8 +425,7 @@ public:
 
   void doConnect() {
     state = GATT_CONNECTING;
-    Serial.printf("GATT [%s] connecting to %s...\n",
-                  session_id.c_str(), mac.c_str());
+    ESP_LOGI("GATT", "[%s] connecting to %s...", session_id.c_str(), mac.c_str());
 
     if (!client) {
       client = NimBLEDevice::createClient();
@@ -675,45 +433,40 @@ public:
 
     NimBLEAddress addr(std::string(mac.c_str()), 0);
     if (!client->connect(addr)) {
-      Serial.printf("GATT [%s] connect failed\n", session_id.c_str());
+      ESP_LOGW("GATT", "[%s] connect failed", session_id.c_str());
       handleConnectFailure();
       return;
     }
 
-    Serial.printf("GATT [%s] connected, discovering service %s\n",
-                  session_id.c_str(), service_uuid.c_str());
+    ESP_LOGI("GATT", "[%s] connected, discovering service %s",
+             session_id.c_str(), service_uuid.c_str());
     state = GATT_DISCOVERING;
 
     remote_service = client->getService(service_uuid.c_str());
     if (!remote_service) {
-      Serial.printf("GATT [%s] service not found\n", session_id.c_str());
+      ESP_LOGW("GATT", "[%s] service not found", session_id.c_str());
       sendError("Service " + service_uuid + " not found");
       close();
       return;
     }
 
-    // Execute init writes
     for (const auto& iw : init_writes) {
       auto chr = remote_service->getCharacteristic(iw.uuid.c_str());
       if (chr) {
         chr->writeValue(iw.data.data(), iw.data.size(), true);
-        Serial.printf("GATT [%s] init write to %s\n",
-                      session_id.c_str(), iw.uuid.c_str());
+        ESP_LOGI("GATT", "[%s] init write to %s", session_id.c_str(), iw.uuid.c_str());
       }
     }
 
-    // Subscribe to notification characteristics
     state = GATT_SUBSCRIBING;
     for (const auto& uuid : notify_uuids) {
       auto chr = remote_service->getCharacteristic(uuid.c_str());
       if (chr && chr->canNotify()) {
-        // Capture session_id and uuid by value for the lambda
         String sid = session_id;
         String cuuid = uuid;
         chr->subscribe(true,
           [sid, cuuid](NimBLERemoteCharacteristic* pChr,
                        uint8_t* data, size_t length, bool isNotify) {
-            // Send notification data over WebSocket
             JsonDocument doc;
             doc["type"] = "gatt_data";
             doc["session_id"] = sid;
@@ -721,25 +474,23 @@ public:
             doc["data"] = bytes_to_hex(data, length);
             ws_send_json(doc);
           });
-        Serial.printf("GATT [%s] subscribed to %s\n",
-                      session_id.c_str(), uuid.c_str());
+        ESP_LOGI("GATT", "[%s] subscribed to %s", session_id.c_str(), uuid.c_str());
       } else {
-        Serial.printf("GATT [%s] char %s not found or not notifiable\n",
-                      session_id.c_str(), uuid.c_str());
+        ESP_LOGW("GATT", "[%s] char %s not found or not notifiable",
+                 session_id.c_str(), uuid.c_str());
       }
     }
 
     state = GATT_ACTIVE;
     retries = 0;
 
-    // Send connected message
     JsonDocument doc;
     doc["type"] = "gatt_connected";
     doc["session_id"] = session_id;
     doc["mac"] = mac;
     ws_send_json(doc);
 
-    Serial.printf("GATT [%s] active\n", session_id.c_str());
+    ESP_LOGI("GATT", "[%s] active", session_id.c_str());
   }
 
   void handleConnectFailure() {
@@ -751,9 +502,9 @@ public:
     }
     state = GATT_RECONNECTING;
     reconnect_at = millis() + GATT_RECONNECT_DELAY_MS * retries;
-    Serial.printf("GATT [%s] retry %d/%d in %lums\n",
-                  session_id.c_str(), retries, GATT_MAX_RETRIES,
-                  GATT_RECONNECT_DELAY_MS * retries);
+    ESP_LOGI("GATT", "[%s] retry %d/%d in %lums",
+             session_id.c_str(), retries, GATT_MAX_RETRIES,
+             GATT_RECONNECT_DELAY_MS * retries);
   }
 
   void handleWrite(const String& uuid, const String& hex_data) {
@@ -772,8 +523,7 @@ public:
     }
 
     if (state == GATT_ACTIVE && client && !client->isConnected()) {
-      // Peripheral disconnected
-      Serial.printf("GATT [%s] peripheral disconnected\n", session_id.c_str());
+      ESP_LOGI("GATT", "[%s] peripheral disconnected", session_id.c_str());
       JsonDocument doc;
       doc["type"] = "gatt_disconnected";
       doc["session_id"] = session_id;
@@ -781,7 +531,7 @@ public:
       ws_send_json(doc);
 
       remote_service = nullptr;
-      handleConnectFailure();  // Will reconnect with backoff
+      handleConnectFailure();
       return;
     }
 
@@ -789,7 +539,6 @@ public:
 
     unsigned long now = millis();
 
-    // Poll reads
     for (auto& pe : poll_entries) {
       if (now - pe.last_poll >= pe.interval_ms) {
         pe.last_poll = now;
@@ -807,7 +556,6 @@ public:
       }
     }
 
-    // Periodic writes
     for (auto& pw : periodic_writes) {
       if (now - pw.last_write >= pw.interval_ms) {
         pw.last_write = now;
@@ -835,7 +583,7 @@ public:
     poll_entries.clear();
     init_writes.clear();
     periodic_writes.clear();
-    Serial.printf("GATT session closed\n");
+    ESP_LOGI("GATT", "Session closed");
   }
 
   void sendError(const String& error) {
@@ -896,39 +644,30 @@ static void gatt_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket client
+// WebSocket message handlers
 // ---------------------------------------------------------------------------
-
-static bool ws_connected = false;
-
-static void ws_send_json(JsonDocument& doc) {
-  if (!ws_connected) return;
-  String msg;
-  serializeJson(doc, msg);
-  ws.sendTXT(msg);
-}
 
 static void send_hello() {
   JsonDocument doc;
-  doc["type"]                   = "hello";
-  doc["gateway_id"]             = GATEWAY_HOSTNAME;
-  doc["firmware"]               = "1.0.0";
-  doc["max_gatt_connections"]   = MAX_GATT_SESSIONS;
+  doc["type"]                    = "hello";
+  doc["gateway_id"]              = SensESPBaseApp::get_hostname();
+  doc["firmware"]                = "2.0.0";
+  doc["max_gatt_connections"]    = MAX_GATT_SESSIONS;
   doc["active_gatt_connections"] = activeGATTCount();
-  doc["mac"]                    = get_mac_address();
-  doc["hostname"]               = GATEWAY_HOSTNAME;
+  doc["mac"]                     = get_device_id();
+  doc["hostname"]                = SensESPBaseApp::get_hostname();
   ws_send_json(doc);
-  Serial.println("WS: sent hello");
+  ESP_LOGI("BLE-WS", "Sent hello");
 }
 
 static void send_status() {
   JsonDocument doc;
-  doc["type"]                   = "status";
-  doc["gateway_id"]             = GATEWAY_HOSTNAME;
-  doc["uptime"]                 = millis() / 1000;
-  doc["free_heap"]              = ESP.getFreeHeap();
+  doc["type"]                    = "status";
+  doc["gateway_id"]              = SensESPBaseApp::get_hostname();
+  doc["uptime"]                  = millis() / 1000;
+  doc["free_heap"]               = ESP.getFreeHeap();
   doc["active_gatt_connections"] = activeGATTCount();
-  doc["max_gatt_connections"]   = MAX_GATT_SESSIONS;
+  doc["max_gatt_connections"]    = MAX_GATT_SESSIONS;
   ws_send_json(doc);
 }
 
@@ -936,7 +675,7 @@ static void handle_ws_message(uint8_t* payload, size_t length) {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, payload, length);
   if (err) {
-    Serial.printf("WS: JSON parse error: %s\n", err.c_str());
+    ESP_LOGW("BLE-WS", "JSON parse error: %s", err.c_str());
     return;
   }
 
@@ -944,11 +683,11 @@ static void handle_ws_message(uint8_t* payload, size_t length) {
   if (!type) return;
 
   if (strcmp(type, "hello_ack") == 0) {
-    Serial.println("WS: hello acknowledged");
+    ESP_LOGI("BLE-WS", "Hello acknowledged");
 
   } else if (strcmp(type, "gatt_subscribe") == 0) {
     String session_id = doc["session_id"].as<String>();
-    Serial.printf("WS: gatt_subscribe session=%s\n", session_id.c_str());
+    ESP_LOGI("BLE-WS", "gatt_subscribe session=%s", session_id.c_str());
 
     GATTSession* slot = findFreeSlot();
     if (!slot) {
@@ -974,7 +713,7 @@ static void handle_ws_message(uint8_t* payload, size_t length) {
 
   } else if (strcmp(type, "gatt_close") == 0) {
     String session_id = doc["session_id"].as<String>();
-    Serial.printf("WS: gatt_close session=%s\n", session_id.c_str());
+    ESP_LOGI("BLE-WS", "gatt_close session=%s", session_id.c_str());
     GATTSession* session = findSession(session_id);
     if (session) {
       session->close();
@@ -982,60 +721,24 @@ static void handle_ws_message(uint8_t* payload, size_t length) {
   }
 }
 
-static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
-  switch (type) {
-    case WStype_DISCONNECTED: {
-      // WebSocketsClient passes the WS close code as a uint16 in payload
-      // when length == 2.  A 4401 close means the server rejected our token.
-      uint16_t close_code = 0;
-      if (length == 2 && payload) {
-        close_code = (payload[0] << 8) | payload[1];
-      }
-      if (close_code == 4401) {
-        Serial.println("WS: token rejected by server — clearing token, re-auth");
-        nvs_clear_token();
-        sk_token = "";
-        auth_state = AuthState::CHECK_SECURITY;
-      } else {
-        Serial.println("WS: disconnected");
-      }
-      ws_initialized = false;
-      ws_connected = false;
-      break;
-    }
+// ---------------------------------------------------------------------------
+// BLE scanner initialization
+// ---------------------------------------------------------------------------
 
-    case WStype_CONNECTED:
-      Serial.printf("WS: connected to %s\n", (char*)payload);
-      ws_connected = true;
-      // Close any stale GATT sessions from a previous server session.
-      // The new server has no record of them and will re-subscribe fresh.
-      closeAllGATTSessions();
-      send_hello();
-      break;
+static void init_ble_scanner() {
+  ads_mutex = xSemaphoreCreateMutex();
 
-    case WStype_TEXT:
-      handle_ws_message(payload, length);
-      break;
+  NimBLEDevice::init("");
 
-    case WStype_PING:
-    case WStype_PONG:
-      break;
-
-    default:
-      break;
-  }
-}
-
-// Initialize WebSocket with the current token.
-// Safe to call multiple times — ws.begin() reinitializes cleanly.
-static void init_websocket() {
-  String ws_path = String(SK_WS_PATH_BASE) + sk_token;
-  ws.begin(SK_SERVER_HOST, SK_SERVER_PORT, ws_path);
-  ws.onEvent(webSocketEvent);
-  ws.setReconnectInterval(5000);
-  ws_initialized = true;
-  Serial.printf("WS: connecting to %s:%u%s\n",
-                SK_SERVER_HOST, SK_SERVER_PORT, ws_path.c_str());
+  NimBLEScan* scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(new BLEScanCallbacks(), true);
+  scan->setActiveScan(false);
+  scan->setInterval(200);
+  scan->setWindow(100);
+  scan->setDuplicateFilter(0);
+  scan->start(0);
+  esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
+  ESP_LOGI("BLE-GW", "BLE scan started");
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,84 +746,58 @@ static void init_websocket() {
 // ---------------------------------------------------------------------------
 
 void setup() {
-  Serial.begin(115200);
-  delay(500);
-  Serial.println();
-  Serial.printf("=== BLE Gateway %s ===\n", GATEWAY_HOSTNAME);
-  Serial.printf("Heap: %u bytes free\n", ESP.getFreeHeap());
-  Serial.printf("Flash: %u bytes, SDK: %s\n", ESP.getFlashChipSize(), ESP.getSdkVersion());
+  SetupLogging(ESP_LOG_INFO);
 
-  // Enable 50MHz crystal oscillator before ETH init
-  Serial.println("Enabling oscillator...");
-  pinMode(OSC_ENABLE_PIN, OUTPUT);
-  digitalWrite(OSC_ENABLE_PIN, HIGH);
-  delay(50);
+  // Build SensESP application:
+  // - Ethernet via Aptinex IsolPoE board (LAN8720, GPIO17 oscillator enable)
+  // - WiFi disabled (BLE and WiFi share the ESP32 radio)
+  // - Signal K server discovered via mDNS (or configured via web UI)
+  // - OTA enabled
+  SensESPAppBuilder builder;
+  auto sensesp_app = builder.set_hostname("signalk-ble-gw")
+      ->set_ethernet(EthernetConfig::aptinex_isolpoe())
+      ->disable_wifi()
+      ->enable_ota("ble-gw-ota")
+      ->get_app();
 
-  Serial.println("Starting Ethernet...");
-  WiFi.mode(WIFI_OFF);
-  Network.onEvent(onEvent);
-  ETH.begin();
-  Serial.printf("Heap after ETH: %u\n", ESP.getFreeHeap());
+  sk_ws_client = sensesp_app->get_ws_client();
 
-  ads_mutex = xSemaphoreCreateMutex();
+  // Initialize BLE scanner
+  init_ble_scanner();
 
-  // Initialize NimBLE scanner
-  Serial.println("Starting NimBLE...");
-  NimBLEDevice::init("");
-  Serial.printf("Heap after NimBLE: %u\n", ESP.getFreeHeap());
+  // React to SKWSClient connection state changes
+  sk_ws_client->connect_to(
+      new LambdaConsumer<SKWSConnectionState>(
+          [](SKWSConnectionState state) {
+            if (state == SKWSConnectionState::kSKWSConnected) {
+              ESP_LOGI("BLE-GW", "SK server connected — starting BLE gateway services");
+              init_custom_websocket();
+            }
+            if (state == SKWSConnectionState::kSKWSDisconnected) {
+              ESP_LOGI("BLE-GW", "SK server disconnected — stopping BLE gateway services");
+              destroy_custom_websocket();
+              closeAllGATTSessions();
+            }
+          }));
 
-  NimBLEScan* scan = NimBLEDevice::getScan();
-  scan->setScanCallbacks(new BLEScanCallbacks(), true);
-  scan->setActiveScan(false);
-  scan->setInterval(200);   // 200ms interval
-  scan->setWindow(100);     // 100ms window → 50% duty cycle
-  scan->setDuplicateFilter(0);
-  scan->start(0);
-  // Suppress NimBLE verbose scan messages (New advertiser / Duplicate; updated).
-  // Must be set after scan->start() — NimBLE resets log levels during init.
-  esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
-  Serial.println("BLE scan started");
-
-  // Start HTTP POST in a background task so it doesn't block ws.loop()
+  // Start HTTP POST in a background FreeRTOS task
   xTaskCreate(http_post_task, "http_post", 8192, NULL, 1, NULL);
-  Serial.println("HTTP POST task created");
 
-  Serial.printf("Setup complete! Heap: %u\n", ESP.getFreeHeap());
-  // Auth and WebSocket init happen in loop() once Ethernet is up
+  // Periodic status over custom WS
+  event_loop()->onRepeat(STATUS_INTERVAL_MS, []() {
+    if (ble_ws_connected) {
+      send_status();
+    }
+  });
+
+  // GATT session loop (reconnects, periodic reads/writes)
+  event_loop()->onRepeat(10, []() {
+    gatt_loop();
+  });
+
+  ESP_LOGI("BLE-GW", "Setup complete, heap=%u", ESP.getFreeHeap());
 }
 
-static unsigned long last_status = 0;
-
 void loop() {
-  unsigned long now = millis();
-
-  if (!eth_connected) {
-    delay(100);
-    return;
-  }
-
-  // Run auth state machine
-  bool authenticated = auth_loop();
-
-  // Once authenticated, initialize WebSocket if not yet done
-  // (or reinitialize after token refresh)
-  if (authenticated && !ws_initialized) {
-    init_websocket();
-  }
-
-  // Service WebSocket (must be called frequently — never block this loop)
-  if (ws_initialized) {
-    ws.loop();
-  }
-
-  // Service GATT sessions (reconnects, periodic writes, poll reads)
-  gatt_loop();
-
-  // Send periodic status over WebSocket
-  if (ws_connected && now - last_status >= STATUS_INTERVAL_MS) {
-    last_status = now;
-    send_status();
-  }
-
-  delay(1);
+  event_loop()->tick();
 }
