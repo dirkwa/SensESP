@@ -27,6 +27,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <NimBLEDevice.h>
+#include <esp_log.h>
 
 #include "sensesp_app_builder.h"
 
@@ -213,6 +214,8 @@ void setup() {
   scan->setWindow(99);          // scan window (ms), <= interval
   scan->setDuplicateFilter(0);  // 0 = report duplicates
   scan->start(0);               // 0 = scan continuously
+  // NimBLE resets IDF log levels during init, so this must come after start()
+  esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
 
   // Periodically forward collected advertisements to the plugin
   event_loop()->onRepeat(POST_INTERVAL_MS, send_advertisements);
