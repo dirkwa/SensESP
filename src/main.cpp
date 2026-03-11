@@ -279,6 +279,7 @@ static void send_advertisements() {
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", String("Bearer ") + token);
+  http.addHeader("Connection", "close");
   http.setTimeout(3000);
 
   int code = http.POST(body);
