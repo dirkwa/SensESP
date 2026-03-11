@@ -195,6 +195,24 @@ SKWSClient::SKWSClient(const String& config_path,
     // Ethernet because the mDNS multicast group join completes asynchronously
     // after DHCP — the race is especially pronounced on Ethernet which gets an
     // IP faster than WiFi.
+
+    // If we already have an IP at construction time (Ethernet blocked in
+    // EthernetProvisioner during setup() before event handlers were registered),
+    // arm the settle timer immediately so mDNS is ready on first connect attempt.
+    event_loop()->onDelay(0, [this]() {
+      if (Network.isOnline()) {
+        mdns_ready_ = false;
+        mdns_retry_interval_ms_ = kMdnsInitialBackoffMs;
+        ESP_LOGI(__FILENAME__,
+                 "Network already online at startup, waiting %lums for mDNS to settle",
+                 kMdnsSettleMs);
+        event_loop()->onDelay(kMdnsSettleMs, [this]() {
+          mdns_ready_ = true;
+          ESP_LOGI(__FILENAME__, "mDNS ready");
+        });
+      }
+    });
+
     Network.onEvent(
         [this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
           mdns_ready_ = false;
@@ -211,14 +229,15 @@ SKWSClient::SKWSClient(const String& config_path,
         ARDUINO_EVENT_ETH_GOT_IP);
 
     // Also handle link-up after cable replug: DHCP may reuse the existing
-    // lease and skip ETH_GOT_IP, going straight to ETH_CONNECTED+hasIP.
+    // lease and skip ETH_GOT_IP, going straight to ETH_CONNECTED.
+    // No isOnline() guard here — the settle delay is harmless to trigger
+    // at link-up time even before DHCP confirms the (reused) lease.
     Network.onEvent(
         [this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
-          if (!Network.isOnline()) return;
           mdns_ready_ = false;
           mdns_retry_interval_ms_ = kMdnsInitialBackoffMs;
           ESP_LOGI(__FILENAME__,
-                   "Ethernet link up (existing IP), waiting %lums for mDNS to settle",
+                   "Ethernet link up, waiting %lums for mDNS to settle",
                    kMdnsSettleMs);
           event_loop()->onDelay(kMdnsSettleMs,
                                 [this]() {
