@@ -210,6 +210,24 @@ SKWSClient::SKWSClient(const String& config_path,
         },
         ARDUINO_EVENT_ETH_GOT_IP);
 
+    // Also handle link-up after cable replug: DHCP may reuse the existing
+    // lease and skip ETH_GOT_IP, going straight to ETH_CONNECTED+hasIP.
+    Network.onEvent(
+        [this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
+          if (!ETH.hasIP()) return;
+          mdns_ready_ = false;
+          mdns_retry_interval_ms_ = kMdnsInitialBackoffMs;
+          ESP_LOGI(__FILENAME__,
+                   "Ethernet link up (existing IP), waiting %lums for mDNS to settle",
+                   kMdnsSettleMs);
+          event_loop()->onDelay(kMdnsSettleMs,
+                                [this]() {
+                                  mdns_ready_ = true;
+                                  ESP_LOGI(__FILENAME__, "mDNS ready");
+                                });
+        },
+        ARDUINO_EVENT_ETH_CONNECTED);
+
     Network.onEvent(
         [this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
           mdns_ready_ = false;
