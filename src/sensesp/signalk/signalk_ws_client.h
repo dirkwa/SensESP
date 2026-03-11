@@ -44,6 +44,7 @@ class SKWSClient : public FileSystemSaveable,
 
   const String get_server_address() const { return server_address_; }
   uint16_t get_server_port() const { return server_port_; }
+  const String& get_auth_token() const { return auth_token_; }
 
   virtual bool to_json(JsonObject& root) override final;
   virtual bool from_json(const JsonObject& config) override final;
