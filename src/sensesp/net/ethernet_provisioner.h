@@ -82,6 +82,10 @@ class EthernetProvisioner {
   explicit EthernetProvisioner(const EthernetConfig& config) {
     String hostname = SensESPBaseApp::get_hostname();
 
+    // After a cold power-on (PoE PD), the switch-side power delivery
+    // negotiation can take 100–500 ms. Give it time before touching the PHY.
+    delay(1000);
+
     ESP_LOGI(__FILENAME__,
              "Initializing Ethernet (PHY type=%d, addr=%d, MDC=%d, MDIO=%d, "
              "power=%d, clk=%d)",

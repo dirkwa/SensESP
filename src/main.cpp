@@ -22,7 +22,6 @@
 
 #include <HTTPClient.h>
 #include <NimBLEDevice.h>
-#include <esp_private/brownout.h>
 #include <esp_websocket_client.h>
 
 #include "sensesp/net/ethernet_provisioner.h"
@@ -748,10 +747,6 @@ static void init_ble_scanner() {
 // ---------------------------------------------------------------------------
 
 void setup() {
-  // Aptinex IsolPoE PoE supply causes brief voltage dips during Ethernet
-  // PHY init and DHCP, triggering the brownout detector. Disable it.
-  esp_brownout_disable();
-
   SetupLogging(ESP_LOG_INFO);
 
   // Build SensESP application:
