@@ -147,15 +147,18 @@ class EthernetProvisioner {
              ETH.fullDuplex() ? "full duplex" : "half duplex",
              ETH.linkSpeed() == 100 ? "100Mbps" : "10Mbps");
 
-    // Wait for DHCP to assign an IP address (up to 15 seconds)
-    for (int i = 0; i < 150 && !ETH.hasIP(); i++) {
+    // Wait for DHCP to assign an IP address (up to 45 seconds).
+    // Switches with spanning tree (STP) hold the port in listening/learning
+    // state for ~30 s before forwarding — DHCP Discovers are dropped during
+    // this period, so 15 s was too short on such networks.
+    for (int i = 0; i < 450 && !ETH.hasIP(); i++) {
       delay(100);
     }
 
     if (ETH.hasIP()) {
       ESP_LOGI(__FILENAME__, "Ethernet IP: %s", ETH.localIP().toString().c_str());
     } else {
-      ESP_LOGW(__FILENAME__, "DHCP timeout — no IP address after 15 s");
+      ESP_LOGW(__FILENAME__, "DHCP timeout — no IP address after 45 s");
     }
   }
 };
