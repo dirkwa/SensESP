@@ -35,6 +35,7 @@
 #include <NimBLEDevice.h>
 #include <WebSocketsClient.h>
 #include <Preferences.h>
+#include "esp_log.h"
 
 #define OSC_ENABLE_PIN  17  // 50MHz crystal oscillator enable
 
@@ -1075,6 +1076,9 @@ void setup() {
   scan->setWindow(100);     // 100ms window → 50% duty cycle
   scan->setDuplicateFilter(0);
   scan->start(0);
+  // Suppress NimBLE verbose scan messages (New advertiser / Duplicate; updated).
+  // Must be set after scan->start() — NimBLE resets log levels during init.
+  esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
   Serial.println("BLE scan started");
 
   // Start HTTP POST in a background task so it doesn't block ws.loop()
