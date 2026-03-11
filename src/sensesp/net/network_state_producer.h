@@ -77,7 +77,7 @@ class NetworkStateProducer : public ValueProducer<NetworkState> {
     // the stack may skip ETH_GOT_IP and go straight to connected+hasIP.
     eth_connected_id_ = Network.onEvent(
         [this](arduino_event_id_t event, arduino_event_info_t info) {
-          if (ETH.hasIP()) {
+          if (Network.isOnline()) {
             on_interface_connected("Ethernet");
           }
         },

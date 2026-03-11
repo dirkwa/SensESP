@@ -214,7 +214,7 @@ SKWSClient::SKWSClient(const String& config_path,
     // lease and skip ETH_GOT_IP, going straight to ETH_CONNECTED+hasIP.
     Network.onEvent(
         [this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
-          if (!ETH.hasIP()) return;
+          if (!Network.isOnline()) return;
           mdns_ready_ = false;
           mdns_retry_interval_ms_ = kMdnsInitialBackoffMs;
           ESP_LOGI(__FILENAME__,
