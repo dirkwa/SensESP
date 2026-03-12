@@ -106,36 +106,20 @@ class EthernetProvisioner {
              config.phy_type, config.phy_addr, config.mdc, config.mdio,
              config.power, config.clk_mode);
 
-    // Determine reset type to decide how to handle the PHY power pin.
-    // On SW_CPU_RESET the EMAC peripheral keeps running — cutting the oscillator
-    // (GPIO17) while the EMAC is active breaks link. Skip the power cycle and
-    // let ETH.begin() detect that the driver is already up and skip reinit.
-    // On POWERON the driver is clean so we power-cycle for a guaranteed clean start.
+    // Drive the PHY oscillator enable pin HIGH and never let the driver touch it.
+    // On this board (Aptinex IsolPoE) GPIO17 enables the 50MHz crystal oscillator.
+    // The oscillator must be running before ETH.begin() — and must never be cut
+    // after that, because the EMAC uses it as its RMII clock source.
+    // We pass power=-1 to ETH.begin() so the driver skips its own reset toggle.
     esp_reset_reason_t reset_reason = esp_reset_reason();
-    bool is_sw_reset = (reset_reason == ESP_RST_SW || reset_reason == ESP_RST_PANIC ||
-                        reset_reason == ESP_RST_TASK_WDT || reset_reason == ESP_RST_INT_WDT ||
-                        reset_reason == ESP_RST_WDT);
+    ESP_LOGI(__FILENAME__, "Reset reason: %d", (int)reset_reason);
 
-    // Pass power=-1 to ETH.begin() so the driver doesn't do its own toggle.
-    int power_for_driver = config.power;
+    int power_for_driver = -1;
     if (config.power >= 0) {
       pinMode(config.power, OUTPUT);
-      if (is_sw_reset) {
-        // SW reset: EMAC may still be running. Keep oscillator on, just
-        // ensure GPIO is driven HIGH and give it a moment to stabilize
-        // in case it wasn't already running (e.g. first flash via esptool).
-        ESP_LOGI(__FILENAME__, "SW reset: ensuring PHY oscillator on GPIO%d is on", config.power);
-        digitalWrite(config.power, HIGH);
-        delay(500);
-      } else {
-        // POWERON: power-cycle for a clean PHY reset.
-        ESP_LOGI(__FILENAME__, "Power-cycling PHY via GPIO%d", config.power);
-        digitalWrite(config.power, LOW);
-        delay(100);  // hold PHY in reset
-        digitalWrite(config.power, HIGH);
-        delay(500);  // let PHY power rail and oscillator stabilize
-      }
-      power_for_driver = -1;
+      digitalWrite(config.power, HIGH);
+      ESP_LOGI(__FILENAME__, "PHY oscillator enabled on GPIO%d", config.power);
+      delay(50);  // give oscillator time to stabilize before ETH.begin()
     }
 
     // Ensure GPIO0 (RMII clock input) is clean before ETH.begin() claims it.
