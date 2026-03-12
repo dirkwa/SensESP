@@ -108,15 +108,19 @@ class EthernetProvisioner {
       ETH.config(config.ip, config.gateway, config.netmask, config.dns);
     }
 
-    // If a power pin is specified, drive it HIGH manually and give the PHY
-    // time to stabilize.  Then pass power=-1 to ETH.begin() so the driver
-    // doesn't do a reset-style low→high→low toggle that would cut power.
+    // If a power pin is specified, cycle it LOW→HIGH to give the PHY a clean
+    // reset regardless of CPU reset type (POWERON or SW_CPU_RESET).
+    // On SW_CPU_RESET the EMAC peripheral keeps running from the previous boot;
+    // power-cycling the PHY forces it to re-negotiate with a clean EMAC init.
+    // Pass power=-1 to ETH.begin() so the driver doesn't do its own toggle.
     int power_for_driver = config.power;
     if (config.power >= 0) {
-      ESP_LOGI(__FILENAME__, "Powering PHY via GPIO%d", config.power);
+      ESP_LOGI(__FILENAME__, "Power-cycling PHY via GPIO%d", config.power);
       pinMode(config.power, OUTPUT);
+      digitalWrite(config.power, LOW);
+      delay(100);  // hold PHY in reset
       digitalWrite(config.power, HIGH);
-      delay(500);  // let PHY power rail stabilize
+      delay(500);  // let PHY power rail and oscillator stabilize
       power_for_driver = -1;
     }
 
@@ -147,9 +151,10 @@ class EthernetProvisioner {
       return;
     }
 
-    ESP_LOGI(__FILENAME__, "Ethernet link up (%s, %s), waiting for DHCP...",
+    ESP_LOGI(__FILENAME__, "Ethernet link up (%s, %s), MAC=%s, waiting for DHCP...",
              ETH.fullDuplex() ? "full duplex" : "half duplex",
-             ETH.linkSpeed() == 100 ? "100Mbps" : "10Mbps");
+             ETH.linkSpeed() == 100 ? "100Mbps" : "10Mbps",
+             ETH.macAddress().c_str());
 
     // Dump initial network state
     ESP_LOGI(__FILENAME__, "ETH.hasIP()=%d Network.isOnline()=%d",
