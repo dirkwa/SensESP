@@ -2,6 +2,9 @@
 #define SENSESP_NET_ETHERNET_PROVISIONER_H_
 
 #include <ETH.h>
+#include <Network.h>
+#include <lwip/netif.h>
+#include <lwip/dhcp.h>
 
 #include "sensesp_base_app.h"
 
@@ -148,11 +151,34 @@ class EthernetProvisioner {
              ETH.fullDuplex() ? "full duplex" : "half duplex",
              ETH.linkSpeed() == 100 ? "100Mbps" : "10Mbps");
 
+    // Dump initial network state
+    ESP_LOGI(__FILENAME__, "ETH.hasIP()=%d Network.isOnline()=%d",
+             (int)ETH.hasIP(), (int)Network.isOnline());
+
+    // Helper lambda: dump all lwIP netifs with DHCP state
+    auto dump_netifs = [](const char* tag) {
+      for (struct netif* nif = netif_list; nif != nullptr; nif = nif->next) {
+        struct dhcp* d = (struct dhcp*)netif_dhcp_data(nif);
+        ESP_LOGI(tag,
+                 "netif %c%c%d flags=0x%02x ip=%s link=%s up=%s dhcp_state=%d tries=%d",
+                 nif->name[0], nif->name[1], nif->num, nif->flags,
+                 ip4addr_ntoa(ip_2_ip4(&nif->ip_addr)),
+                 (nif->flags & NETIF_FLAG_LINK_UP) ? "UP" : "DOWN",
+                 (nif->flags & NETIF_FLAG_UP) ? "UP" : "DOWN",
+                 d ? (int)d->state : -1,
+                 d ? (int)d->tries : -1);
+      }
+    };
+
+    dump_netifs(__FILENAME__);
+
     // Wait for DHCP to assign an IP address (up to 45 seconds).
-    // Switches with spanning tree (STP) hold the port in listening/learning
-    // state for ~30 s before forwarding — DHCP Discovers are dropped during
-    // this period, so 15 s was too short on such networks.
     for (int i = 0; i < 450 && !ETH.hasIP(); i++) {
+      if (i % 20 == 0) {  // every 2 seconds
+        ESP_LOGI(__FILENAME__, "DHCP wait %ds: hasIP=%d isOnline=%d",
+                 i / 10, (int)ETH.hasIP(), (int)Network.isOnline());
+        dump_netifs(__FILENAME__);
+      }
       delay(100);
     }
 
@@ -160,6 +186,7 @@ class EthernetProvisioner {
       ESP_LOGI(__FILENAME__, "Ethernet IP: %s", ETH.localIP().toString().c_str());
     } else {
       ESP_LOGW(__FILENAME__, "DHCP timeout — no IP address after 45 s");
+      dump_netifs(__FILENAME__);
     }
   }
 };
