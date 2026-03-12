@@ -105,32 +105,32 @@ class EthernetProvisioner {
              config.phy_type, config.phy_addr, config.mdc, config.mdio,
              config.power, config.clk_mode);
 
-    // On SW_CPU_RESET the ETH driver (_esp_netif) survives from the previous
-    // boot, causing ETH.begin() to return true immediately without reinitializing
-    // the EMAC. Use reset reason to detect this and call ETH.end() to force a
-    // clean reinit. Only on software resets — POWERON always has a clean driver.
-    {
-      esp_reset_reason_t reason = esp_reset_reason();
-      bool is_sw_reset = (reason == ESP_RST_SW || reason == ESP_RST_PANIC ||
-                          reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT ||
-                          reason == ESP_RST_WDT);
-      if (is_sw_reset) {
-        ESP_LOGI(__FILENAME__, "SW reset (reason=%d) — tearing down previous ETH driver", reason);
-        ETH.end();
-        delay(200);
-      }
-    }
+    // Determine reset type to decide how to handle the PHY power pin.
+    // On SW_CPU_RESET the EMAC peripheral keeps running — cutting the oscillator
+    // (GPIO17) while the EMAC is active breaks link. Skip the power cycle and
+    // let ETH.begin() detect that the driver is already up and skip reinit.
+    // On POWERON the driver is clean so we power-cycle for a guaranteed clean start.
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    bool is_sw_reset = (reset_reason == ESP_RST_SW || reset_reason == ESP_RST_PANIC ||
+                        reset_reason == ESP_RST_TASK_WDT || reset_reason == ESP_RST_INT_WDT ||
+                        reset_reason == ESP_RST_WDT);
 
-    // Power-cycle the PHY so it resets cleanly on every boot type.
     // Pass power=-1 to ETH.begin() so the driver doesn't do its own toggle.
     int power_for_driver = config.power;
     if (config.power >= 0) {
-      ESP_LOGI(__FILENAME__, "Power-cycling PHY via GPIO%d", config.power);
       pinMode(config.power, OUTPUT);
-      digitalWrite(config.power, LOW);
-      delay(100);  // hold PHY in reset
-      digitalWrite(config.power, HIGH);
-      delay(500);  // let PHY power rail and oscillator stabilize
+      if (is_sw_reset) {
+        // Keep oscillator running — just ensure GPIO is OUTPUT HIGH.
+        ESP_LOGI(__FILENAME__, "SW reset: keeping PHY oscillator on GPIO%d running", config.power);
+        digitalWrite(config.power, HIGH);
+      } else {
+        // POWERON: power-cycle for a clean PHY reset.
+        ESP_LOGI(__FILENAME__, "Power-cycling PHY via GPIO%d", config.power);
+        digitalWrite(config.power, LOW);
+        delay(100);  // hold PHY in reset
+        digitalWrite(config.power, HIGH);
+        delay(500);  // let PHY power rail and oscillator stabilize
+      }
       power_for_driver = -1;
     }
 
