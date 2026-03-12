@@ -3,6 +3,7 @@
 
 #include <ETH.h>
 #include <Network.h>
+#include <esp_system.h>
 #include <lwip/netif.h>
 #include <lwip/dhcp.h>
 
@@ -104,14 +105,20 @@ class EthernetProvisioner {
              config.phy_type, config.phy_addr, config.mdc, config.mdio,
              config.power, config.clk_mode);
 
-    // On SW_CPU_RESET the ETH driver object (_esp_netif) survives from the
-    // previous boot, causing ETH.begin() to return true immediately without
-    // reinitializing the EMAC. Call ETH.end() first to tear down the previous
-    // driver state so ETH.begin() does a full init regardless of reset type.
-    if (ETH.linkUp() || ETH.started()) {
-      ESP_LOGI(__FILENAME__, "Tearing down previous ETH driver state");
-      ETH.end();
-      delay(100);
+    // On SW_CPU_RESET the ETH driver (_esp_netif) survives from the previous
+    // boot, causing ETH.begin() to return true immediately without reinitializing
+    // the EMAC. Use reset reason to detect this and call ETH.end() to force a
+    // clean reinit. Only on software resets — POWERON always has a clean driver.
+    {
+      esp_reset_reason_t reason = esp_reset_reason();
+      bool is_sw_reset = (reason == ESP_RST_SW || reason == ESP_RST_PANIC ||
+                          reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT ||
+                          reason == ESP_RST_WDT);
+      if (is_sw_reset) {
+        ESP_LOGI(__FILENAME__, "SW reset (reason=%d) — tearing down previous ETH driver", reason);
+        ETH.end();
+        delay(200);
+      }
     }
 
     // Power-cycle the PHY so it resets cleanly on every boot type.
