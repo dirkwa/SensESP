@@ -104,10 +104,17 @@ class EthernetProvisioner {
              config.phy_type, config.phy_addr, config.mdc, config.mdio,
              config.power, config.clk_mode);
 
-    // If a power pin is specified, cycle it LOW→HIGH to give the PHY a clean
-    // reset regardless of CPU reset type (POWERON or SW_CPU_RESET).
-    // On SW_CPU_RESET the EMAC peripheral keeps running from the previous boot;
-    // power-cycling the PHY forces it to re-negotiate with a clean EMAC init.
+    // On SW_CPU_RESET the ETH driver object (_esp_netif) survives from the
+    // previous boot, causing ETH.begin() to return true immediately without
+    // reinitializing the EMAC. Call ETH.end() first to tear down the previous
+    // driver state so ETH.begin() does a full init regardless of reset type.
+    if (ETH.linkUp() || ETH.started()) {
+      ESP_LOGI(__FILENAME__, "Tearing down previous ETH driver state");
+      ETH.end();
+      delay(100);
+    }
+
+    // Power-cycle the PHY so it resets cleanly on every boot type.
     // Pass power=-1 to ETH.begin() so the driver doesn't do its own toggle.
     int power_for_driver = config.power;
     if (config.power >= 0) {
