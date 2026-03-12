@@ -120,9 +120,12 @@ class EthernetProvisioner {
     if (config.power >= 0) {
       pinMode(config.power, OUTPUT);
       if (is_sw_reset) {
-        // Keep oscillator running — just ensure GPIO is OUTPUT HIGH.
-        ESP_LOGI(__FILENAME__, "SW reset: keeping PHY oscillator on GPIO%d running", config.power);
+        // SW reset: EMAC may still be running. Keep oscillator on, just
+        // ensure GPIO is driven HIGH and give it a moment to stabilize
+        // in case it wasn't already running (e.g. first flash via esptool).
+        ESP_LOGI(__FILENAME__, "SW reset: ensuring PHY oscillator on GPIO%d is on", config.power);
         digitalWrite(config.power, HIGH);
+        delay(500);
       } else {
         // POWERON: power-cycle for a clean PHY reset.
         ESP_LOGI(__FILENAME__, "Power-cycling PHY via GPIO%d", config.power);
