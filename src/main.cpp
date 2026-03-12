@@ -754,16 +754,11 @@ void setup() {
   // - WiFi disabled (BLE and WiFi share the ESP32 radio)
   // - Signal K server discovered via mDNS (or configured via web UI)
   // - OTA enabled
-  // Temporary static IP to test TX — remove when DHCP is confirmed working
-  EthernetConfig eth_cfg = EthernetConfig::aptinex_isolpoe();
-  eth_cfg.use_dhcp = false;
-  eth_cfg.ip      = IPAddress(192, 168, 0, 120);
-  eth_cfg.gateway = IPAddress(192, 168, 0, 1);
-  eth_cfg.netmask = IPAddress(255, 255, 255, 0);
-
+  // - Button disabled: GPIO0 is RMII clock input; pinMode(0) would destroy EMAC
   SensESPAppBuilder builder;
   auto sensesp_app = builder.set_hostname("signalk-ble-gw")
-      ->set_ethernet(eth_cfg)
+      ->set_ethernet(EthernetConfig::aptinex_isolpoe())
+      ->set_button_pin(-1)
       ->disable_wifi()
       ->enable_ota("ble-gw-ota")
       ->get_app();
