@@ -754,11 +754,9 @@ void setup() {
   // - WiFi disabled (BLE and WiFi share the ESP32 radio)
   // - Signal K server discovered via mDNS (or configured via web UI)
   // - OTA enabled
-  // - Button disabled: GPIO0 is RMII clock input; pinMode(0) would destroy EMAC
   SensESPAppBuilder builder;
   auto sensesp_app = builder.set_hostname("signalk-ble-gw")
       ->set_ethernet(EthernetConfig::aptinex_isolpoe())
-      ->set_button_pin(-1)
       ->disable_wifi()
       ->enable_ota("ble-gw-ota")
       ->get_app();

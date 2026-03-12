@@ -2,11 +2,6 @@
 #define SENSESP_NET_ETHERNET_PROVISIONER_H_
 
 #include <ETH.h>
-#include <Network.h>
-#include <esp_system.h>
-#include <driver/gpio.h>
-#include <lwip/netif.h>
-#include <lwip/dhcp.h>
 
 #include "sensesp_base_app.h"
 
@@ -33,11 +28,6 @@ struct EthernetConfig {
   IPAddress gateway;
   IPAddress netmask = IPAddress(255, 255, 255, 0);
   IPAddress dns = IPAddress(0, 0, 0, 0);  // 0.0.0.0 = use DHCP-provided DNS
-
-  // Extra delay (ms) before PHY init. Use for PoE boards where the PD power
-  // delivery negotiation completes after the ESP32 has already started booting.
-  // Leave at 0 for USB-powered or wall-wart boards.
-  unsigned int poe_stabilize_ms = 0;
 
   // Board presets
   static EthernetConfig olimex_esp32_poe_iso() {
@@ -92,48 +82,26 @@ class EthernetProvisioner {
   explicit EthernetProvisioner(const EthernetConfig& config) {
     String hostname = SensESPBaseApp::get_hostname();
 
-    // On PoE boards, the switch-side power delivery negotiation can complete
-    // after the ESP32 has already started booting. Wait before touching the PHY.
-    if (config.poe_stabilize_ms > 0) {
-      ESP_LOGI(__FILENAME__, "Waiting %ums for PoE power to stabilize",
-               config.poe_stabilize_ms);
-      delay(config.poe_stabilize_ms);
-    }
-
     ESP_LOGI(__FILENAME__,
              "Initializing Ethernet (PHY type=%d, addr=%d, MDC=%d, MDIO=%d, "
              "power=%d, clk=%d)",
              config.phy_type, config.phy_addr, config.mdc, config.mdio,
              config.power, config.clk_mode);
 
-    // Drive the PHY oscillator enable pin HIGH and never let the driver touch it.
-    // On this board (Aptinex IsolPoE) GPIO17 enables the 50MHz crystal oscillator.
-    // The oscillator must be running before ETH.begin() — and must never be cut
-    // after that, because the EMAC uses it as its RMII clock source.
-    // We pass power=-1 to ETH.begin() so the driver skips its own reset toggle.
-    esp_reset_reason_t reset_reason = esp_reset_reason();
-    ESP_LOGI(__FILENAME__, "Reset reason: %d", (int)reset_reason);
-
-    int power_for_driver = -1;
-    if (config.power >= 0) {
-      pinMode(config.power, OUTPUT);
-      digitalWrite(config.power, HIGH);
-      ESP_LOGI(__FILENAME__, "PHY oscillator enabled on GPIO%d", config.power);
-      delay(50);  // give oscillator time to stabilize before ETH.begin()
+    if (!config.use_dhcp) {
+      ETH.config(config.ip, config.gateway, config.netmask, config.dns);
     }
 
-    // Ensure GPIO0 (RMII clock input) is clean before ETH.begin() claims it.
-    // The Arduino framework or SensESP button handler may configure GPIO0 as
-    // INPUT_PULLUP which can interfere with the EMAC RMII clock mux assignment.
-    if (config.clk_mode == ETH_CLOCK_GPIO0_IN) {
-      gpio_config_t io_conf = {};
-      io_conf.pin_bit_mask = (1ULL << 0);
-      io_conf.mode = GPIO_MODE_INPUT;
-      io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-      io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-      io_conf.intr_type = GPIO_INTR_DISABLE;
-      gpio_config(&io_conf);
-      ESP_LOGI(__FILENAME__, "GPIO0 configured as clean input for RMII clock");
+    // If a power pin is specified, drive it HIGH manually and give the PHY
+    // time to stabilize.  Then pass power=-1 to ETH.begin() so the driver
+    // doesn't do a reset-style low→high→low toggle that would cut power.
+    int power_for_driver = config.power;
+    if (config.power >= 0) {
+      ESP_LOGI(__FILENAME__, "Powering PHY via GPIO%d", config.power);
+      pinMode(config.power, OUTPUT);
+      digitalWrite(config.power, HIGH);
+      delay(500);  // let PHY power rail stabilize
+      power_for_driver = -1;
     }
 
     bool started = ETH.begin(config.phy_type, config.phy_addr, config.mdc,
@@ -145,72 +113,32 @@ class EthernetProvisioner {
     }
 
     ETH.setHostname(hostname.c_str());
-
-    // Static IP must be configured after ETH.begin() (requires _esp_netif).
-    if (!config.use_dhcp) {
-      ETH.config(config.ip, config.gateway, config.netmask, config.dns);
-      ESP_LOGI(__FILENAME__, "Static IP configured: %s", config.ip.toString().c_str());
-    }
-
     ESP_LOGI(__FILENAME__, "Ethernet interface initialized, waiting for link...");
 
-    // Wait for physical link (up to 60 seconds).
-    // On PoE boards the switch-side power negotiation can take well over 10s,
-    // keeping the PHY oscillator unpowered until it completes.
-    for (int i = 0; i < 600 && !ETH.linkUp(); i++) {
-      if (i % 100 == 99) {
-        ESP_LOGW(__FILENAME__, "Still waiting for Ethernet link... (%ds)", (i + 1) / 10);
-      }
+    // Wait for physical link (up to 10 seconds)
+    for (int i = 0; i < 100 && !ETH.linkUp(); i++) {
       delay(100);
     }
 
     if (!ETH.linkUp()) {
       ESP_LOGE(__FILENAME__,
-               "Ethernet link not established after 60 s — check cable");
+               "Ethernet link not established after 10 s — check cable");
       return;
     }
 
-    ESP_LOGI(__FILENAME__, "Ethernet link up (%s, %s), MAC=%s, waiting for DHCP...",
+    ESP_LOGI(__FILENAME__, "Ethernet link up (%s, %s), waiting for DHCP...",
              ETH.fullDuplex() ? "full duplex" : "half duplex",
-             ETH.linkSpeed() == 100 ? "100Mbps" : "10Mbps",
-             ETH.macAddress().c_str());
+             ETH.linkSpeed() == 100 ? "100Mbps" : "10Mbps");
 
-    // Dump initial network state
-    ESP_LOGI(__FILENAME__, "ETH.hasIP()=%d Network.isOnline()=%d",
-             (int)ETH.hasIP(), (int)Network.isOnline());
-
-    // Helper lambda: dump all lwIP netifs with DHCP state
-    auto dump_netifs = [](const char* tag) {
-      for (struct netif* nif = netif_list; nif != nullptr; nif = nif->next) {
-        struct dhcp* d = (struct dhcp*)netif_dhcp_data(nif);
-        ESP_LOGI(tag,
-                 "netif %c%c%d flags=0x%02x ip=%s link=%s up=%s dhcp_state=%d tries=%d",
-                 nif->name[0], nif->name[1], nif->num, nif->flags,
-                 ip4addr_ntoa(ip_2_ip4(&nif->ip_addr)),
-                 (nif->flags & NETIF_FLAG_LINK_UP) ? "UP" : "DOWN",
-                 (nif->flags & NETIF_FLAG_UP) ? "UP" : "DOWN",
-                 d ? (int)d->state : -1,
-                 d ? (int)d->tries : -1);
-      }
-    };
-
-    dump_netifs(__FILENAME__);
-
-    // Wait for DHCP to assign an IP address (up to 45 seconds).
-    for (int i = 0; i < 450 && !ETH.hasIP(); i++) {
-      if (i % 20 == 0) {  // every 2 seconds
-        ESP_LOGI(__FILENAME__, "DHCP wait %ds: hasIP=%d isOnline=%d",
-                 i / 10, (int)ETH.hasIP(), (int)Network.isOnline());
-        dump_netifs(__FILENAME__);
-      }
+    // Wait for DHCP to assign an IP address (up to 15 seconds)
+    for (int i = 0; i < 150 && !ETH.hasIP(); i++) {
       delay(100);
     }
 
     if (ETH.hasIP()) {
       ESP_LOGI(__FILENAME__, "Ethernet IP: %s", ETH.localIP().toString().c_str());
     } else {
-      ESP_LOGW(__FILENAME__, "DHCP timeout — no IP address after 45 s");
-      dump_netifs(__FILENAME__);
+      ESP_LOGW(__FILENAME__, "DHCP timeout — no IP address after 15 s");
     }
   }
 };
