@@ -40,9 +40,7 @@ struct EthernetConfig {
     // The provisioner handles the power-on manually with a proper delay,
     // then passes power=-1 to ETH.begin() to skip the driver's too-fast
     // reset-style toggle.
-    EthernetConfig c{ETH_PHY_LAN8720, 0, 23, 18, 12, ETH_CLOCK_GPIO17_OUT};
-    c.poe_stabilize_ms = 1000;
-    return c;
+    return {ETH_PHY_LAN8720, 0, 23, 18, 12, ETH_CLOCK_GPIO17_OUT};
   }
   static EthernetConfig olimex_esp32_gateway() {
     return {ETH_PHY_LAN8720, 0, 23, 18, 5, ETH_CLOCK_GPIO17_OUT};
@@ -55,9 +53,7 @@ struct EthernetConfig {
   }
   static EthernetConfig aptinex_isolpoe() {
     // External 50 MHz crystal oscillator on GPIO0; PHY power on GPIO17.
-    EthernetConfig c{ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
-    c.poe_stabilize_ms = 1000;
-    return c;
+    return {ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
   }
 };
 
