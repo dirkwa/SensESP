@@ -132,14 +132,19 @@ class EthernetProvisioner {
     ETH.setHostname(hostname.c_str());
     ESP_LOGI(__FILENAME__, "Ethernet interface initialized, waiting for link...");
 
-    // Wait for physical link (up to 10 seconds)
-    for (int i = 0; i < 100 && !ETH.linkUp(); i++) {
+    // Wait for physical link (up to 60 seconds).
+    // On PoE boards the switch-side power negotiation can take well over 10s,
+    // keeping the PHY oscillator unpowered until it completes.
+    for (int i = 0; i < 600 && !ETH.linkUp(); i++) {
+      if (i % 100 == 99) {
+        ESP_LOGW(__FILENAME__, "Still waiting for Ethernet link... (%ds)", (i + 1) / 10);
+      }
       delay(100);
     }
 
     if (!ETH.linkUp()) {
       ESP_LOGE(__FILENAME__,
-               "Ethernet link not established after 10 s — check cable");
+               "Ethernet link not established after 60 s — check cable");
       return;
     }
 
