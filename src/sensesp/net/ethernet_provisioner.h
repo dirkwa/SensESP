@@ -104,10 +104,6 @@ class EthernetProvisioner {
              config.phy_type, config.phy_addr, config.mdc, config.mdio,
              config.power, config.clk_mode);
 
-    if (!config.use_dhcp) {
-      ETH.config(config.ip, config.gateway, config.netmask, config.dns);
-    }
-
     // If a power pin is specified, cycle it LOW→HIGH to give the PHY a clean
     // reset regardless of CPU reset type (POWERON or SW_CPU_RESET).
     // On SW_CPU_RESET the EMAC peripheral keeps running from the previous boot;
@@ -133,6 +129,13 @@ class EthernetProvisioner {
     }
 
     ETH.setHostname(hostname.c_str());
+
+    // Static IP must be configured after ETH.begin() (requires _esp_netif).
+    if (!config.use_dhcp) {
+      ETH.config(config.ip, config.gateway, config.netmask, config.dns);
+      ESP_LOGI(__FILENAME__, "Static IP configured: %s", config.ip.toString().c_str());
+    }
+
     ESP_LOGI(__FILENAME__, "Ethernet interface initialized, waiting for link...");
 
     // Wait for physical link (up to 60 seconds).
