@@ -4,6 +4,7 @@
 #include <ETH.h>
 #include <Network.h>
 #include <esp_system.h>
+#include <driver/gpio.h>
 #include <lwip/netif.h>
 #include <lwip/dhcp.h>
 
@@ -135,6 +136,20 @@ class EthernetProvisioner {
         delay(500);  // let PHY power rail and oscillator stabilize
       }
       power_for_driver = -1;
+    }
+
+    // Ensure GPIO0 (RMII clock input) is clean before ETH.begin() claims it.
+    // The Arduino framework or SensESP button handler may configure GPIO0 as
+    // INPUT_PULLUP which can interfere with the EMAC RMII clock mux assignment.
+    if (config.clk_mode == ETH_CLOCK_GPIO0_IN) {
+      gpio_config_t io_conf = {};
+      io_conf.pin_bit_mask = (1ULL << 0);
+      io_conf.mode = GPIO_MODE_INPUT;
+      io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+      io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+      io_conf.intr_type = GPIO_INTR_DISABLE;
+      gpio_config(&io_conf);
+      ESP_LOGI(__FILENAME__, "GPIO0 configured as clean input for RMII clock");
     }
 
     bool started = ETH.begin(config.phy_type, config.phy_addr, config.mdc,
