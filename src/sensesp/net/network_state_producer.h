@@ -41,7 +41,6 @@ class NetworkStateProducer : public ValueProducer<NetworkState> {
   network_event_handle_t sta_disconnected_id_;
   network_event_handle_t ap_start_id_;
   network_event_handle_t ap_stop_id_;
-  network_event_handle_t eth_connected_id_;
   network_event_handle_t eth_got_ip_id_;
   network_event_handle_t eth_disconnected_id_;
 
@@ -73,16 +72,6 @@ class NetworkStateProducer : public ValueProducer<NetworkState> {
         ARDUINO_EVENT_WIFI_AP_STOP);
 
     // Ethernet events
-    // ETH_CONNECTED fires on link-up (replug); if DHCP lease is still valid
-    // the stack may skip ETH_GOT_IP and go straight to connected+hasIP.
-    eth_connected_id_ = Network.onEvent(
-        [this](arduino_event_id_t event, arduino_event_info_t info) {
-          if (Network.isOnline()) {
-            on_interface_connected("Ethernet");
-          }
-        },
-        ARDUINO_EVENT_ETH_CONNECTED);
-
     eth_got_ip_id_ = Network.onEvent(
         [this](arduino_event_id_t event, arduino_event_info_t info) {
           on_interface_connected("Ethernet");
@@ -101,7 +90,6 @@ class NetworkStateProducer : public ValueProducer<NetworkState> {
     Network.removeEvent(sta_disconnected_id_);
     Network.removeEvent(ap_start_id_);
     Network.removeEvent(ap_stop_id_);
-    Network.removeEvent(eth_connected_id_);
     Network.removeEvent(eth_got_ip_id_);
     Network.removeEvent(eth_disconnected_id_);
   }
