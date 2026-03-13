@@ -57,11 +57,10 @@ struct EthernetConfig {
     return {ETH_PHY_LAN8720, 1, 23, 18, 16, ETH_CLOCK_GPIO0_IN};
   }
   static EthernetConfig aptinex_isolpoe() {
-    // External 50 MHz crystal oscillator on GPIO0; PHY power on GPIO17.
-    // 3s delay for PoE PD negotiation to complete before touching the PHY.
-    EthernetConfig cfg = {ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
-    cfg.poe_stabilize_ms = 8000;
-    return cfg;
+    // GPIO17 = 50MHz crystal oscillator enable; GPIO0 = RMII clock input.
+    // power=17 is passed to ETH driver on POWERON for proper LAN8720 reset,
+    // and bypassed on SW reset to avoid cutting the oscillator mid-operation.
+    return {ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
   }
 };
 
@@ -95,15 +94,8 @@ class EthernetProvisioner {
   explicit EthernetProvisioner(const EthernetConfig& config) {
     String hostname = SensESPBaseApp::get_hostname();
 
-    // On PoE boards, the switch-side power delivery negotiation takes time after
-    // cold power-on. Only apply the full stabilize delay on POWERON — SW resets
-    // don't cut PoE power so no wait is needed.
     esp_reset_reason_t reset_reason = esp_reset_reason();
-    if (config.poe_stabilize_ms > 0 && reset_reason == ESP_RST_POWERON) {
-      ESP_LOGI(__FILENAME__, "POWERON: waiting %ums for PoE power to stabilize",
-               config.poe_stabilize_ms);
-      delay(config.poe_stabilize_ms);
-    }
+    ESP_LOGI(__FILENAME__, "Reset reason: %d", (int)reset_reason);
 
     ESP_LOGI(__FILENAME__,
              "Initializing Ethernet (PHY type=%d, addr=%d, MDC=%d, MDIO=%d, "
@@ -111,19 +103,24 @@ class EthernetProvisioner {
              config.phy_type, config.phy_addr, config.mdc, config.mdio,
              config.power, config.clk_mode);
 
-    // Drive the PHY oscillator enable pin HIGH and never let the driver touch it.
-    // On this board (Aptinex IsolPoE) GPIO17 enables the 50MHz crystal oscillator.
-    // The oscillator must be running before ETH.begin() — and must never be cut
-    // after that, because the EMAC uses it as its RMII clock source.
-    // We pass power=-1 to ETH.begin() so the driver skips its own reset toggle.
-    ESP_LOGI(__FILENAME__, "Reset reason: %d", (int)reset_reason);
-
-    int power_for_driver = -1;
+    // GPIO17 = oscillator enable on Aptinex IsolPoE.
+    // On POWERON: let ETH.begin() own the pin so the driver performs the proper
+    // LAN8720 hardware reset sequence (LOW→HIGH with correct timing).
+    // On SW reset: the EMAC is already running; drive HIGH ourselves and pass
+    // power=-1 so the driver never cuts the oscillator mid-operation.
+    int power_for_driver = config.power;
     if (config.power >= 0) {
-      pinMode(config.power, OUTPUT);
-      digitalWrite(config.power, HIGH);
-      ESP_LOGI(__FILENAME__, "PHY oscillator enabled on GPIO%d", config.power);
-      delay(50);  // give oscillator time to stabilize before ETH.begin()
+      bool is_poweron = (reset_reason == ESP_RST_POWERON);
+      if (is_poweron) {
+        ESP_LOGI(__FILENAME__, "POWERON: passing GPIO%d to ETH driver for PHY reset", config.power);
+        // Driver will drive LOW then HIGH to reset PHY — correct for cold boot.
+      } else {
+        ESP_LOGI(__FILENAME__, "SW reset: driving GPIO%d HIGH, bypassing driver reset", config.power);
+        pinMode(config.power, OUTPUT);
+        digitalWrite(config.power, HIGH);
+        delay(50);
+        power_for_driver = -1;
+      }
     }
 
     // Ensure GPIO0 (RMII clock input) is clean before ETH.begin() claims it.
