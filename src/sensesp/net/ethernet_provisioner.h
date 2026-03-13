@@ -60,7 +60,7 @@ struct EthernetConfig {
     // External 50 MHz crystal oscillator on GPIO0; PHY power on GPIO17.
     // 3s delay for PoE PD negotiation to complete before touching the PHY.
     EthernetConfig cfg = {ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
-    cfg.poe_stabilize_ms = 3000;
+    cfg.poe_stabilize_ms = 8000;
     return cfg;
   }
 };
@@ -95,10 +95,12 @@ class EthernetProvisioner {
   explicit EthernetProvisioner(const EthernetConfig& config) {
     String hostname = SensESPBaseApp::get_hostname();
 
-    // On PoE boards, the switch-side power delivery negotiation can complete
-    // after the ESP32 has already started booting. Wait before touching the PHY.
-    if (config.poe_stabilize_ms > 0) {
-      ESP_LOGI(__FILENAME__, "Waiting %ums for PoE power to stabilize",
+    // On PoE boards, the switch-side power delivery negotiation takes time after
+    // cold power-on. Only apply the full stabilize delay on POWERON — SW resets
+    // don't cut PoE power so no wait is needed.
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    if (config.poe_stabilize_ms > 0 && reset_reason == ESP_RST_POWERON) {
+      ESP_LOGI(__FILENAME__, "POWERON: waiting %ums for PoE power to stabilize",
                config.poe_stabilize_ms);
       delay(config.poe_stabilize_ms);
     }
@@ -114,7 +116,6 @@ class EthernetProvisioner {
     // The oscillator must be running before ETH.begin() — and must never be cut
     // after that, because the EMAC uses it as its RMII clock source.
     // We pass power=-1 to ETH.begin() so the driver skips its own reset toggle.
-    esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(__FILENAME__, "Reset reason: %d", (int)reset_reason);
 
     int power_for_driver = -1;
