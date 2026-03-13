@@ -58,7 +58,10 @@ struct EthernetConfig {
   }
   static EthernetConfig aptinex_isolpoe() {
     // External 50 MHz crystal oscillator on GPIO0; PHY power on GPIO17.
-    return {ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
+    // 3s delay for PoE PD negotiation to complete before touching the PHY.
+    EthernetConfig cfg = {ETH_PHY_LAN8720, 1, 23, 18, 17, ETH_CLOCK_GPIO0_IN};
+    cfg.poe_stabilize_ms = 3000;
+    return cfg;
   }
 };
 
