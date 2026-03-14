@@ -175,27 +175,34 @@ void loop() {
     dump_desc("TX_CURR", dma_tx_curr);
     dump_desc("TX_BASE", dma_tx_list);
 
-    // DMA is pointing to random heap (packet buffer misread as descriptor).
-    // Stop DMA, zero out the fake OWN bit at TX_CURR if outside ring, redirect.
+    // DMA is permanently stuck at 0x3ffaf3f0 (lwIP packet buffer misread as descriptor).
+    // Writing list ptr doesn't reset TX_CURR — need full DMA software reset.
+    // DMA Bus Mode reg (0x3FF69000) bit 0 = SWR (software reset); clears all DMA state.
     static bool dma_reset_done = false;
-    if (!dma_reset_done && dma_tx_curr != dma_tx_list) {
-      uint32_t opmode = REG_READ(0x3FF69018);
-      REG_WRITE(0x3FF69018, opmode & ~(1u << 13));  // stop TX DMA
+    if (!dma_reset_done) {
+      uint32_t busmode = REG_READ(0x3FF69000);
+      uint32_t opmode  = REG_READ(0x3FF69018);
+      // Stop TX and RX DMA first
+      REG_WRITE(0x3FF69018, opmode & ~((1u << 13) | (1u << 1)));
       ets_delay_us(500);
-      // Clear OWN bit at whatever address DMA is stuck on (if in valid DRAM)
-      if (dma_tx_curr >= 0x3FF00000 && dma_tx_curr <= 0x3FFFFFFF) {
-        volatile uint32_t* stuck = (volatile uint32_t*)dma_tx_curr;
-        if (stuck[0] >> 31) {
-          Serial.printf("  Clearing OWN at TX_CURR 0x%08x DES0=0x%08x\n", dma_tx_curr, stuck[0]);
-          stuck[0] &= ~0x80000000u;
-        }
+      // Issue software reset — clears TX_CURR, RX_CURR, all DMA state
+      REG_WRITE(0x3FF69000, busmode | 1u);
+      // Wait for reset to complete (bit 0 auto-clears)
+      for (int i = 0; i < 1000; i++) {
+        if (!(REG_READ(0x3FF69000) & 1u)) break;
+        ets_delay_us(10);
       }
-      // Point DMA back to ring base and restart
+      Serial.printf("  DMA SWR done, BUS_MODE=0x%08x\n", REG_READ(0x3FF69000));
+      // Reprogram list base addresses
       REG_WRITE(0x3FF69010, dma_tx_list);
-      REG_WRITE(0x3FF69018, opmode | (1u << 13));
-      REG_WRITE(0x3FF69004, 1);
+      uint32_t rx_list = REG_READ(0x3FF6900C);  // save RX list base
+      REG_WRITE(0x3FF6900C, rx_list);
+      // Restore opmode (start TX and RX DMA)
+      REG_WRITE(0x3FF69018, opmode | (1u << 13) | (1u << 1));
+      REG_WRITE(0x3FF69004, 1);  // TX poll demand
+      REG_WRITE(0x3FF69008, 1);  // RX poll demand
       dma_reset_done = true;
-      Serial.printf("  DMA TX redirected to 0x%08x, poll demand written\n", dma_tx_list);
+      Serial.printf("  DMA reset + restarted, TX_LIST=0x%08x\n", dma_tx_list);
     }
 
     // Sample GPIO0 100 times rapidly to check if oscillator is actually toggling.
