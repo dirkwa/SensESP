@@ -130,19 +130,19 @@ void loop() {
                   (int)((dma_status >> 17) & 0x7));
     Serial.printf("  TX_LIST_BASE=0x%08x  TX_CURR_DESC=0x%08x\n",
                   dma_tx_list, dma_tx_curr);
-    // Read first 4 words of current TX descriptor (DES0..DES3)
-    if (dma_tx_curr >= 0x3FF00000 && dma_tx_curr <= 0x3FFFFFFF) {
-      Serial.printf("  TX_DESC: DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x\n",
-                    *((volatile uint32_t*)(dma_tx_curr + 0)),
-                    *((volatile uint32_t*)(dma_tx_curr + 4)),
-                    *((volatile uint32_t*)(dma_tx_curr + 8)),
-                    *((volatile uint32_t*)(dma_tx_curr + 12)));
-      // DES0 bit 31 = OWN (1=DMA owns, 0=CPU owns); bit 0 = DE (error)
-      uint32_t des0 = *((volatile uint32_t*)(dma_tx_curr));
-      Serial.printf("  TX_DESC OWN=%d ES=%d\n",
-                    (int)((des0 >> 31) & 1),
-                    (int)((des0 >> 15) & 1));
-    }
+    // Dump current TX desc AND ring base desc to compare
+    auto dump_desc = [](const char* label, uint32_t addr) {
+      if (addr >= 0x3FF00000 && addr <= 0x3FFFFFFF) {
+        uint32_t d0 = *((volatile uint32_t*)(addr + 0));
+        uint32_t d1 = *((volatile uint32_t*)(addr + 4));
+        uint32_t d2 = *((volatile uint32_t*)(addr + 8));
+        uint32_t d3 = *((volatile uint32_t*)(addr + 12));
+        Serial.printf("  %s @0x%08x: DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
+                      label, addr, d0, d1, d2, d3, (int)(d0 >> 31));
+      }
+    };
+    dump_desc("TX_CURR", dma_tx_curr);
+    dump_desc("TX_BASE", dma_tx_list);
     // Sample GPIO0 100 times rapidly to check if oscillator is actually toggling.
     // With 50MHz signal we should see a mix of 0s and 1s; if stuck = no clock.
     // Temporarily switch GPIO0 to GPIO input mode to sample it.
