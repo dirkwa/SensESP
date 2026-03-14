@@ -91,6 +91,37 @@ void setup() {
                 REG_READ(IO_MUX_GPIO0_REG),
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
                 (int)digitalRead(OSC_EN_PIN));
+
+  // Walk TX descriptor ring and clear OWN on any descriptor with invalid
+  // buffer address (outside DRAM 0x3FF00000-0x3FFFFFFF). These are garbage
+  // descriptors left from EMAC DMA running without a working clock at boot,
+  // causing bus errors. Must stop TX DMA first.
+  uint32_t tx_list = REG_READ(0x3FF69010);
+  uint32_t opmode  = REG_READ(0x3FF69018);
+  REG_WRITE(0x3FF69018, opmode & ~(1u << 13));  // stop TX DMA
+  ets_delay_us(200);
+  int fixed = 0;
+  uint32_t desc = tx_list;
+  for (int i = 0; i < 64; i++) {  // ring has at most 64 descriptors
+    if (desc < 0x3FF00000 || desc > 0x3FFFFFFF) break;
+    volatile uint32_t* d = (volatile uint32_t*)desc;
+    uint32_t des0 = d[0];
+    uint32_t des2 = d[2];  // buffer address
+    uint32_t des3 = d[3];  // next descriptor
+    bool own     = (des0 >> 31) & 1;
+    bool buf_bad = des2 < 0x3FF00000 || des2 > 0x3FFFFFFF;
+    if (own && buf_bad) {
+      d[0] = des0 & ~0x80000000u;  // clear OWN
+      fixed++;
+    }
+    if (des3 == tx_list || des3 < 0x3FF00000 || des3 > 0x3FFFFFFF) break;
+    desc = des3;
+  }
+  // Restart TX DMA from ring base
+  REG_WRITE(0x3FF69010, tx_list);
+  REG_WRITE(0x3FF69018, opmode | (1u << 13));
+  REG_WRITE(0x3FF69004, 1);  // poll demand
+  Serial.printf("ETH: TX ring scrubbed (%d bad descriptors fixed), DMA restarted\n", fixed);
 }
 
 void loop() {
