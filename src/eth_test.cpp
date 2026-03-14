@@ -98,19 +98,20 @@ void loop() {
                   ETH.localIP().toString().c_str(),
                   ETH.macAddress().c_str());
 
-    // Read EMAC DMA status register to see if TX engine is running.
-    // EMAC base: 0x3FF69000. Status reg offset 0x14, Op Mode 0x18.
-    // DMA Status reg5 (0x14): bits [22:20] TX status, bits [19:17] RX status.
-    uint32_t dma_status = REG_READ(0x3FF69014);
-    uint32_t dma_opmode = REG_READ(0x3FF69018);
+    // EMAC DMA registers (base 0x3FF69000)
+    uint32_t dma_status  = REG_READ(0x3FF69014);  // DMA status
+    uint32_t dma_opmode  = REG_READ(0x3FF69018);  // DMA op mode
+    uint32_t dma_tx_desc = REG_READ(0x3FF69050);  // current TX desc addr
+    uint32_t dma_rx_desc = REG_READ(0x3FF69054);  // current RX desc addr
+    uint32_t dma_tx_buf  = REG_READ(0x3FF69058);  // current TX buf addr
     uint32_t emac_config = REG_READ(0x3FF6A000);  // MAC config
-    Serial.printf("  EMAC DMA_STATUS=0x%08x  DMA_OPMODE=0x%08x  MAC_CONFIG=0x%08x\n",
-                  dma_status, dma_opmode, emac_config);
-    Serial.printf("  TX_STATE=%d  RX_STATE=%d  TX_EN=%d  RX_EN=%d\n",
+    Serial.printf("  DMA_STATUS=0x%08x  TX_STATE=%d  RX_STATE=%d\n",
+                  dma_status,
                   (int)((dma_status >> 20) & 0x7),
-                  (int)((dma_status >> 17) & 0x7),
-                  (int)((dma_opmode >> 13) & 1),   // ST bit
-                  (int)((dma_opmode >> 1) & 1));    // SR bit
+                  (int)((dma_status >> 17) & 0x7));
+    Serial.printf("  DMA_TX_DESC=0x%08x  DMA_RX_DESC=0x%08x  DMA_TX_BUF=0x%08x\n",
+                  dma_tx_desc, dma_rx_desc, dma_tx_buf);
+    Serial.printf("  MAC_CONFIG=0x%08x\n", emac_config);
 
     // Read LAN8720 PHY registers via MDIO
     esp_eth_handle_t h = ETH.handle();
