@@ -62,26 +62,31 @@ void setup() {
   delay(10);  // let oscillator stabilise
   Serial.println("ETH: GPIO17 HIGH (oscillator on)");
 
-  // IDF v5 marks GPIO0 as reserved (strapping pin). Pre-revoke it so
-  // emac_esp_iomux_rmii_clk_input() can configure the IOMUX function.
+  // Pre-configure GPIO0 as EMAC RMII clock input BEFORE ETH.begin().
+  // IDF v5 marks GPIO0 as reserved (strapping pin) and perimanClearPinBus()
+  // inside ETH.begin() may reset it. By setting IOMUX here AND after, we
+  // ensure the clock is present when esp_eth_start() launches the DMA.
   esp_gpio_revoke(BIT64(GPIO_NUM_0));
-  Serial.println("ETH: GPIO0 reservation revoked");
+  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
+  PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
+  Serial.printf("ETH: GPIO0 pre-configured  IO_MUX=0x%08x  MCU_SEL=%d\n",
+                REG_READ(IO_MUX_GPIO0_REG),
+                (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
 
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
   // power=-1: don't let IDF touch GPIO17
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
-  Serial.println("ETH: ETH.begin() called with power=-1");
 
-  // Force GPIO0 IOMUX to EMAC clock input (func=5), no pull resistors.
-  // emac_esp_iomux_rmii_clk_input() may silently skip this if its internal
-  // revoke fails — writing the register directly guarantees it.
+  // Re-apply IOMUX after ETH.begin() in case perimanClearPinBus reset it.
   REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
   PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-  Serial.printf("ETH: GPIO0 IO_MUX=0x%08x  MCU_SEL=%d (want 5)  GPIO17=%d\n",
+  Serial.printf("ETH: GPIO0 post-ETH.begin  IO_MUX=0x%08x  MCU_SEL=%d  GPIO17=%d\n",
                 REG_READ(IO_MUX_GPIO0_REG),
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
                 (int)digitalRead(OSC_EN_PIN));
