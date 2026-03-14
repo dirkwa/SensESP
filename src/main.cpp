@@ -746,6 +746,16 @@ static void init_ble_scanner() {
 // Arduino setup / loop
 // ---------------------------------------------------------------------------
 
+// Drive GPIO17 (oscillator enable) HIGH as early as possible on cold boot.
+// The board has a 4.7kΩ pulldown on GPIO17, so on POWERON the oscillator is
+// off until firmware drives it HIGH. The LAN8720 needs the 50MHz clock running
+// before the EMAC tries to communicate with it via MDIO.
+__attribute__((constructor)) static void early_gpio17_high() {
+  // Use ESP-IDF GPIO directly — Arduino not initialized yet.
+  gpio_set_direction((gpio_num_t)17, GPIO_MODE_OUTPUT);
+  gpio_set_level((gpio_num_t)17, 1);
+}
+
 void setup() {
   SetupLogging(ESP_LOG_INFO);
 
