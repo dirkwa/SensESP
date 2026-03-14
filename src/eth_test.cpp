@@ -120,11 +120,31 @@ void loop() {
                   (int)((oscclk_conf >> 24) & 1),
                   (int)((phyinf_conf >> 13) & 7));
 
-    uint32_t dma_status = REG_READ(0x3FF69014);
+    uint32_t dma_status   = REG_READ(0x3FF69014);
+    uint32_t dma_tx_list  = REG_READ(0x3FF69010);  // TX desc list base addr (set at init)
+    uint32_t dma_tx_curr  = REG_READ(0x3FF69050);  // current TX desc pointer
     Serial.printf("  DMA_STATUS=0x%08x  TX_STATE=%d  RX_STATE=%d\n",
                   dma_status,
                   (int)((dma_status >> 20) & 0x7),
                   (int)((dma_status >> 17) & 0x7));
+    Serial.printf("  TX_LIST_BASE=0x%08x  TX_CURR_DESC=0x%08x\n",
+                  dma_tx_list, dma_tx_curr);
+    // Read first 4 words of current TX descriptor (DES0..DES3)
+    if (dma_tx_curr >= 0x3FF00000 && dma_tx_curr <= 0x3FFFFFFF) {
+      Serial.printf("  TX_DESC: DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x\n",
+                    *((volatile uint32_t*)(dma_tx_curr + 0)),
+                    *((volatile uint32_t*)(dma_tx_curr + 4)),
+                    *((volatile uint32_t*)(dma_tx_curr + 8)),
+                    *((volatile uint32_t*)(dma_tx_curr + 12)));
+      // DES0 bit 31 = OWN (1=DMA owns, 0=CPU owns); bit 0 = DE (error)
+      uint32_t des0 = *((volatile uint32_t*)(dma_tx_curr));
+      Serial.printf("  TX_DESC OWN=%d ES=%d\n",
+                    (int)((des0 >> 31) & 1),
+                    (int)((des0 >> 15) & 1));
+    }
+    // Poke TX poll demand to wake DMA from suspended state
+    REG_WRITE(0x3FF69004, 1);
+    Serial.printf("  TX poll demand written\n");
 
   }
 }
