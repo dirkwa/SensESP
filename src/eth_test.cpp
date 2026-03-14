@@ -47,19 +47,17 @@ void setup() {
   delay(200);
   Serial.println("\nAptinex IsolPoE ETH test starting...");
 
-  // Power-cycle the 50MHz oscillator now that boot strapping is done.
-  // GPIO0 was held LOW during boot; cycling the oscillator gives LAN8720
-  // a clean clock after GPIO0 is released as a normal input.
+  // Power-cycle the oscillator with longer delays (matches known-good workaround).
+  // 200ms LOW ensures PHY sees a proper reset, 1000ms stabilizes RMII clock.
   gpio_set_direction((gpio_num_t)OSC_EN_PIN, GPIO_MODE_OUTPUT);
   gpio_set_level((gpio_num_t)OSC_EN_PIN, 0);
-  delay(10);
+  delay(200);
   gpio_set_level((gpio_num_t)OSC_EN_PIN, 1);
-  delay(50);  // oscillator start-up time
-  Serial.println("ETH: oscillator power-cycled, clock should be clean");
+  delay(1000);
+  Serial.println("ETH: oscillator power-cycled, starting ETH...");
 
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
-  // Pass power=-1: we manage GPIO17 ourselves above, driver must not touch it.
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
 }
