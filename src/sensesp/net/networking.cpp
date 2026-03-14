@@ -40,9 +40,12 @@ Networking::Networking(const String& config_path, const String& client_ssid,
   // Ethernet events, so network state tracking works normally.
   if (wifi_disabled) {
     ESP_LOGI(__FILENAME__, "WiFi disabled — skipping WiFi initialization");
-    // Turn off the WiFi radio to prevent interference with the RMII external
-    // clock on GPIO0 (used by Ethernet boards such as Aptinex IsolPoE).
+    // Fully shut down the WiFi radio via ESP-IDF to prevent interference with
+    // the RMII external clock on GPIO0 (Aptinex IsolPoE and similar boards).
     WiFi.mode(WIFI_OFF);
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    ESP_LOGI(__FILENAME__, "WiFi radio shut down");
     ap_settings_.enabled_ = false;
     int num_fill = kMaxNumClientConfigs - client_settings_.size();
     for (int i = 0; i < num_fill; i++) {
