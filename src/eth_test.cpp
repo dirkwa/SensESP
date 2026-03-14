@@ -143,6 +143,32 @@ void loop() {
     };
     dump_desc("TX_CURR", dma_tx_curr);
     dump_desc("TX_BASE", dma_tx_list);
+
+    // TX_CURR is in random heap; TX_BASE has a real descriptor (OWN=0, size=0x15e).
+    // OWN=0 means driver hasn't handed it to DMA yet, OR DMA processed with error.
+    // Force DMA TX back to ring base: stop ST, write list ptr, restart ST.
+    static bool dma_reset_done = false;
+    if (!dma_reset_done) {
+      // Set OWN=1 on TX_BASE descriptor to hand it to DMA
+      volatile uint32_t* des0_ptr = (volatile uint32_t*)dma_tx_list;
+      uint32_t des0 = *des0_ptr;
+      Serial.printf("  TX_BASE DES0 before=0x%08x\n", des0);
+      if (des0 != 0 && !(des0 >> 31)) {
+        // Has content but OWN=0 — set OWN=1
+        *des0_ptr = des0 | 0x80000000u;
+        Serial.printf("  TX_BASE DES0 after =0x%08x (OWN set)\n", *des0_ptr);
+      }
+      // Redirect DMA TX to ring base and kick it
+      uint32_t opmode = REG_READ(0x3FF69018);
+      REG_WRITE(0x3FF69018, opmode & ~(1u << 13));  // stop TX DMA
+      ets_delay_us(100);
+      REG_WRITE(0x3FF69010, dma_tx_list);            // reset list ptr
+      REG_WRITE(0x3FF69018, opmode | (1u << 13));    // start TX DMA
+      REG_WRITE(0x3FF69004, 1);                      // poll demand
+      dma_reset_done = true;
+      Serial.printf("  DMA TX redirected to TX_LIST_BASE + poll demand\n");
+    }
+
     // Sample GPIO0 100 times rapidly to check if oscillator is actually toggling.
     // With 50MHz signal we should see a mix of 0s and 1s; if stuck = no clock.
     // Temporarily switch GPIO0 to GPIO input mode to sample it.
