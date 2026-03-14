@@ -47,18 +47,14 @@ void setup() {
   delay(200);
   Serial.println("\nAptinex IsolPoE ETH test starting...");
 
-  // ETH_CLOCK_GPIO16_OUT: ESP32 drives RMII clock on GPIO16.
-  // Oscillator stays ON (GPIO17 HIGH) to feed LAN8720 XI pin.
-  // GPIO0 is not used for clocking — no boot strapping contention.
-  gpio_set_direction((gpio_num_t)OSC_EN_PIN, GPIO_MODE_OUTPUT);
-  gpio_set_level((gpio_num_t)OSC_EN_PIN, 1);
-  delay(50);
-  Serial.println("ETH: oscillator ON, ESP32 drives RMII clock on GPIO16...");
-
+  // Let the ETH driver manage GPIO17 (oscillator enable) via the power parameter.
+  // Factory firmware (IDF v4.4) passes power=17 to ETH.begin and it works.
+  // Driver drives LOW, delays, then HIGH before PHY init.
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
-            -1, ETH_CLK_MODE);
+            OSC_EN_PIN, ETH_CLK_MODE);
+  Serial.println("ETH: ETH.begin() called with power=17");
 }
 
 void loop() {
