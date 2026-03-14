@@ -9,6 +9,7 @@
 #include <ETH.h>
 #include <WiFi.h>
 #include "driver/gpio.h"
+#include "esp_private/esp_gpio_reserve.h"  // esp_gpio_revoke()
 
 #define OSC_EN_PIN 17
 
@@ -47,18 +48,13 @@ void setup() {
   delay(200);
   Serial.println("\nAptinex IsolPoE ETH test starting...");
 
-  // Explicitly disable internal pullup/pulldown on GPIO0 before ETH init.
-  // IDF v5 may leave boot strapping pullup active, interfering with the oscillator
-  // driving GPIO0 as RMII REFCLK input.
-  gpio_config_t gpio0_cfg = {
-    .pin_bit_mask = (1ULL << 0),
-    .mode = GPIO_MODE_INPUT,
-    .pull_up_en = GPIO_PULLUP_DISABLE,
-    .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    .intr_type = GPIO_INTR_DISABLE,
-  };
-  gpio_config(&gpio0_cfg);
-  Serial.println("ETH: GPIO0 pullup/pulldown disabled");
+  // IDF v5 marks GPIO0 as reserved (strapping pin).
+  // emac_esp_iomux_rmii_clk_input() calls esp_gpio_revoke() to unreserve it,
+  // but if that fails (e.g. already reserved by boot ROM tracking), it skips
+  // the gpio_iomux_input() call entirely — EMAC gets no clock → zero TX.
+  // Pre-revoke GPIO0 here so the EMAC driver finds it unreserved.
+  esp_gpio_revoke(BIT64(GPIO_NUM_0));
+  Serial.println("ETH: GPIO0 reservation revoked");
 
   // Let the ETH driver manage GPIO17 (oscillator enable) via the power parameter.
   // Factory firmware (IDF v4.4) passes power=17 to ETH.begin and it works.
