@@ -47,11 +47,14 @@ void setup() {
   delay(200);
   Serial.println("\nAptinex IsolPoE ETH test starting...");
 
-  // ETH_CLOCK_GPIO0_OUT: ESP32 generates 50MHz on GPIO0.
-  // External oscillator (GPIO17 enable) must stay OFF to avoid bus contention.
+  // ETH_CLOCK_GPIO0_IN: oscillator runs, feeds 50MHz into GPIO0.
+  // Power-cycle the oscillator after boot strapping to get clean clock.
   gpio_set_direction((gpio_num_t)OSC_EN_PIN, GPIO_MODE_OUTPUT);
   gpio_set_level((gpio_num_t)OSC_EN_PIN, 0);
-  Serial.println("ETH: external oscillator disabled, ESP32 drives clock...");
+  delay(200);
+  gpio_set_level((gpio_num_t)OSC_EN_PIN, 1);
+  delay(1000);
+  Serial.println("ETH: oscillator power-cycled, starting ETH...");
 
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
