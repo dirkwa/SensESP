@@ -3,6 +3,7 @@
 // If this gets an IP, the hardware is fine and the issue is in SensESP init.
 
 #include <ETH.h>
+#include <WiFi.h>
 
 static bool eth_connected = false;
 
@@ -38,6 +39,7 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println("\nAptinex IsolPoE ETH test starting...");
+  WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
   ETH.begin();
 }
