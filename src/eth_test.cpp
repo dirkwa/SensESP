@@ -98,8 +98,21 @@ void loop() {
                   ETH.localIP().toString().c_str(),
                   ETH.macAddress().c_str());
 
-    // Read LAN8720 PHY registers via MDIO to check actual PHY state.
-    // REG 0 = Basic Control, REG 1 = Basic Status, REG 31 = Special Control/Status
+    // Read EMAC DMA status register to see if TX engine is running.
+    // EMAC base: 0x3FF69000. Status reg offset 0x14, Op Mode 0x18.
+    // DMA Status reg5 (0x14): bits [22:20] TX status, bits [19:17] RX status.
+    uint32_t dma_status = REG_READ(0x3FF69014);
+    uint32_t dma_opmode = REG_READ(0x3FF69018);
+    uint32_t emac_config = REG_READ(0x3FF6A000);  // MAC config
+    Serial.printf("  EMAC DMA_STATUS=0x%08x  DMA_OPMODE=0x%08x  MAC_CONFIG=0x%08x\n",
+                  dma_status, dma_opmode, emac_config);
+    Serial.printf("  TX_STATE=%d  RX_STATE=%d  TX_EN=%d  RX_EN=%d\n",
+                  (int)((dma_status >> 20) & 0x7),
+                  (int)((dma_status >> 17) & 0x7),
+                  (int)((dma_opmode >> 13) & 1),   // ST bit
+                  (int)((dma_opmode >> 1) & 1));    // SR bit
+
+    // Read LAN8720 PHY registers via MDIO
     esp_eth_handle_t h = ETH.handle();
     if (h) {
       for (uint32_t reg : {0u, 1u, 31u}) {
