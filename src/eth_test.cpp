@@ -10,8 +10,7 @@
 #include <WiFi.h>
 #include "driver/gpio.h"
 #include "esp_private/esp_gpio_reserve.h"   // esp_gpio_revoke()
-#include "esp_private/gpio.h"               // gpio_iomux_input()
-#include "soc/io_mux_reg.h"                 // FUNC_GPIO0_EMAC_TX_CLK, IO_MUX_GPIO0_REG
+#include "soc/io_mux_reg.h"                 // FUNC_GPIO0_EMAC_TX_CLK, IO_MUX_GPIO0_REG, MCU_SEL
 
 #define OSC_EN_PIN 17
 
@@ -67,10 +66,13 @@ void setup() {
   Serial.println("ETH: ETH.begin() called with power=17");
 
   // Force GPIO0 IOMUX to EMAC clock input function (IDF v5 reservation bug workaround).
-  // emac_esp_iomux_rmii_clk_input() may skip gpio_iomux_input() if its internal
-  // esp_gpio_revoke() fails — leaving EMAC with no clock → zero TX.
-  // Calling this after ETH.begin() overrides whatever the driver left in place.
-  gpio_iomux_input(GPIO_NUM_0, FUNC_GPIO0_EMAC_TX_CLK, 0);
+  // emac_esp_iomux_rmii_clk_input() may skip this if its internal esp_gpio_revoke()
+  // fails — leaving EMAC with no clock → zero TX.
+  // Write IO_MUX register directly: set MCU_SEL=5 (FUNC_GPIO0_EMAC_TX_CLK), enable
+  // input (IE=1), disable output enable (OE=0). No GPIO matrix involvement needed
+  // for IOMUX — signal goes directly from pin to EMAC peripheral.
+  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);  // func=5
+  PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
   Serial.println("ETH: GPIO0 IOMUX forced to EMAC_TX_CLK (func=5)");
 }
 
