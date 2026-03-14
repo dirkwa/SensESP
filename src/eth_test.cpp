@@ -66,10 +66,11 @@ void loop() {
   static unsigned long last = 0;
   if (millis() - last > 5000) {
     last = millis();
-    Serial.printf("uptime=%lus  linked=%d  hasIP=%d  ip=%s\n",
+    Serial.printf("uptime=%lus  linked=%d  hasIP=%d  ip=%s  MAC=%s\n",
                   millis() / 1000,
                   (int)ETH.linkUp(),
                   (int)ETH.hasIP(),
-                  ETH.localIP().toString().c_str());
+                  ETH.localIP().toString().c_str(),
+                  ETH.macAddress().c_str());
   }
 }
