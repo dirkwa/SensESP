@@ -47,9 +47,21 @@ void setup() {
   delay(200);
   Serial.println("\nAptinex IsolPoE ETH test starting...");
 
+  // Explicitly disable internal pullup/pulldown on GPIO0 before ETH init.
+  // IDF v5 may leave boot strapping pullup active, interfering with the oscillator
+  // driving GPIO0 as RMII REFCLK input.
+  gpio_config_t gpio0_cfg = {
+    .pin_bit_mask = (1ULL << 0),
+    .mode = GPIO_MODE_INPUT,
+    .pull_up_en = GPIO_PULLUP_DISABLE,
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .intr_type = GPIO_INTR_DISABLE,
+  };
+  gpio_config(&gpio0_cfg);
+  Serial.println("ETH: GPIO0 pullup/pulldown disabled");
+
   // Let the ETH driver manage GPIO17 (oscillator enable) via the power parameter.
   // Factory firmware (IDF v4.4) passes power=17 to ETH.begin and it works.
-  // Driver drives LOW, delays, then HIGH before PHY init.
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
