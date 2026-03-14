@@ -14,7 +14,7 @@
 #include "driver/gpio.h"
 #include "esp_private/esp_gpio_reserve.h"   // esp_gpio_revoke()
 #include "soc/io_mux_reg.h"                 // FUNC_GPIO0_EMAC_TX_CLK, IO_MUX_GPIO0_REG
-#include "esp_eth_driver.h"                 // ETH_CMD_READ_PHY_REG
+#include "soc/emac_ext_struct.h"             // EMAC_EXT, emac_ext_dev_t
 
 #define OSC_EN_PIN 17
 
@@ -98,31 +98,28 @@ void loop() {
                   ETH.localIP().toString().c_str(),
                   ETH.macAddress().c_str());
 
-    // EMAC DMA registers (base 0x3FF69000)
-    uint32_t dma_status  = REG_READ(0x3FF69014);  // DMA status
-    uint32_t dma_opmode  = REG_READ(0x3FF69018);  // DMA op mode
-    uint32_t dma_tx_desc = REG_READ(0x3FF69050);  // current TX desc addr
-    uint32_t dma_rx_desc = REG_READ(0x3FF69054);  // current RX desc addr
-    uint32_t dma_tx_buf  = REG_READ(0x3FF69058);  // current TX buf addr
-    uint32_t emac_config = REG_READ(0x3FF6A000);  // MAC config
+    // EMAC EXT clock registers — base address of EMAC_EXT peripheral
+    // ex_clkout_conf @ +0x00, ex_oscclk_conf @ +0x04, ex_clk_ctrl @ +0x08, ex_phyinf_conf @ +0x0C
+    uint32_t ext_base    = (uint32_t)&EMAC_EXT;
+    uint32_t clkout_conf = REG_READ(ext_base + 0x00);
+    uint32_t oscclk_conf = REG_READ(ext_base + 0x04);
+    uint32_t clk_ctrl    = REG_READ(ext_base + 0x08);
+    uint32_t phyinf_conf = REG_READ(ext_base + 0x0C);
+    Serial.printf("  EMAC_EXT base=0x%08x\n", ext_base);
+    Serial.printf("  ex_clkout=0x%08x  ex_oscclk=0x%08x  ex_clk_ctrl=0x%08x  ex_phyinf=0x%08x\n",
+                  clkout_conf, oscclk_conf, clk_ctrl, phyinf_conf);
+    // For ETH_CLOCK_GPIO0_IN: ext_en=1 int_en=0 clk_sel=1 phy_intf_sel=4
+    Serial.printf("  ext_en=%d int_en=%d clk_sel=%d phy_intf_sel=%d (want 1,0,1,4)\n",
+                  (int)(clk_ctrl & 1),
+                  (int)((clk_ctrl >> 1) & 1),
+                  (int)((oscclk_conf >> 24) & 1),
+                  (int)((phyinf_conf >> 13) & 7));
+
+    uint32_t dma_status = REG_READ(0x3FF69014);
     Serial.printf("  DMA_STATUS=0x%08x  TX_STATE=%d  RX_STATE=%d\n",
                   dma_status,
                   (int)((dma_status >> 20) & 0x7),
                   (int)((dma_status >> 17) & 0x7));
-    Serial.printf("  DMA_TX_DESC=0x%08x  DMA_RX_DESC=0x%08x  DMA_TX_BUF=0x%08x\n",
-                  dma_tx_desc, dma_rx_desc, dma_tx_buf);
-    Serial.printf("  MAC_CONFIG=0x%08x\n", emac_config);
 
-    // Read LAN8720 PHY registers via MDIO
-    esp_eth_handle_t h = ETH.handle();
-    if (h) {
-      for (uint32_t reg : {0u, 1u, 31u}) {
-        esp_eth_phy_reg_rw_data_t rw = {.reg_addr = reg, .reg_value_p = nullptr};
-        uint32_t val = 0xFFFF;
-        rw.reg_value_p = &val;
-        esp_eth_ioctl(h, ETH_CMD_READ_PHY_REG, &rw);
-        Serial.printf("  PHY reg%02u = 0x%04x\n", reg, val);
-      }
-    }
   }
 }
