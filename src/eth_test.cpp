@@ -73,7 +73,11 @@ void setup() {
   // for IOMUX — signal goes directly from pin to EMAC peripheral.
   REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);  // func=5
   PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
-  Serial.println("ETH: GPIO0 IOMUX forced to EMAC_TX_CLK (func=5)");
+  uint32_t iomux_val = REG_READ(IO_MUX_GPIO0_REG);
+  Serial.printf("ETH: GPIO0 IO_MUX=0x%08x  MCU_SEL=%d (want 5)  GPIO17=%d\n",
+                iomux_val,
+                (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
+                (int)digitalRead(17));
 }
 
 void loop() {
