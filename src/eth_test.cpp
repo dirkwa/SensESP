@@ -15,6 +15,7 @@
 #include "esp_private/esp_gpio_reserve.h"   // esp_gpio_revoke()
 #include "soc/io_mux_reg.h"                 // FUNC_GPIO0_EMAC_TX_CLK, IO_MUX_GPIO0_REG
 #include "soc/emac_ext_struct.h"             // EMAC_EXT, emac_ext_dev_t
+#include "soc/gpio_reg.h"                    // GPIO_IN_REG
 
 #define OSC_EN_PIN 17
 
@@ -142,18 +143,21 @@ void loop() {
                     (int)((des0 >> 31) & 1),
                     (int)((des0 >> 15) & 1));
     }
-    // TX_CURR_DESC is wandering through random heap (not the real ring at TX_LIST_BASE).
-    // Reset DMA TX: stop it, point back to TX_LIST_BASE, restart.
-    uint32_t opmode = REG_READ(0x3FF69018);
-    // Clear ST bit (bit 13) to stop TX DMA
-    REG_WRITE(0x3FF69018, opmode & ~(1u << 13));
-    // Reset TX list pointer to the base
-    REG_WRITE(0x3FF69010, dma_tx_list);
-    // Re-set ST bit to restart TX DMA
-    REG_WRITE(0x3FF69018, opmode | (1u << 13));
-    // Poll demand to kick it
-    REG_WRITE(0x3FF69004, 1);
-    Serial.printf("  DMA TX reset to TX_LIST_BASE, poll demand written\n");
+    // Sample GPIO0 100 times rapidly to check if oscillator is actually toggling.
+    // With 50MHz signal we should see a mix of 0s and 1s; if stuck = no clock.
+    // Temporarily switch GPIO0 to GPIO input mode to sample it.
+    REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, 2);  // func=2 = GPIO
+    PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
+    int ones = 0;
+    for (int i = 0; i < 100; i++) {
+      ones += (int)((REG_READ(GPIO_IN_REG) >> 0) & 1);
+    }
+    // Restore EMAC clock function
+    REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
+    PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
+    CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
+    CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
+    Serial.printf("  GPIO0 sample: %d/100 ones (50MHz = ~50, stuck-high=100, stuck-low=0)\n", ones);
 
   }
 }
