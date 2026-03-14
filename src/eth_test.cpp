@@ -3,14 +3,17 @@
 // GPIO17 = oscillator enable (4.7k pulldown → off by default).
 // ETH_CLK_MODE = ETH_CLOCK_GPIO0_IN: 50MHz clock from oscillator into GPIO0.
 // GPIO0 is a boot strapping pin — briefly driven LOW during boot.
-// Fix: power-cycle the oscillator AFTER boot strapping completes so LAN8720
-// gets a clean clock edge, then pass power=-1 so driver doesn't touch GPIO17.
+//
+// IDF v5 change: power pin is used as PHY nRST (pulsed LOW then HIGH).
+// On this board GPIO17 is oscillator enable — pulsing it LOW kills the clock
+// during PHY reset, preventing LAN8720 RMII init. Pass power=-1 and drive
+// GPIO17 HIGH manually before ETH.begin() so the oscillator is always on.
 
 #include <ETH.h>
 #include <WiFi.h>
 #include "driver/gpio.h"
 #include "esp_private/esp_gpio_reserve.h"   // esp_gpio_revoke()
-#include "soc/io_mux_reg.h"                 // FUNC_GPIO0_EMAC_TX_CLK, IO_MUX_GPIO0_REG, MCU_SEL
+#include "soc/io_mux_reg.h"                 // FUNC_GPIO0_EMAC_TX_CLK, IO_MUX_GPIO0_REG
 
 #define OSC_EN_PIN 17
 
@@ -49,37 +52,38 @@ void setup() {
   delay(200);
   Serial.println("\nAptinex IsolPoE ETH test starting...");
 
-  // IDF v5 marks GPIO0 as reserved (strapping pin).
-  // emac_esp_iomux_rmii_clk_input() calls esp_gpio_revoke() to unreserve it,
-  // but if that fails (e.g. already reserved by boot ROM tracking), it skips
-  // the gpio_iomux_input() call entirely — EMAC gets no clock → zero TX.
-  // Pre-revoke GPIO0 here so the EMAC driver finds it unreserved.
+  // Enable oscillator: GPIO17 HIGH drives the 50MHz oscillator on.
+  // Do this BEFORE ETH.begin() so the LAN8720 has a stable RMII clock
+  // throughout init. Pass power=-1 to ETH.begin() so IDF v5 doesn't
+  // pulse GPIO17 LOW (as PHY reset) and kill the oscillator mid-init.
+  pinMode(OSC_EN_PIN, OUTPUT);
+  digitalWrite(OSC_EN_PIN, HIGH);
+  delay(10);  // let oscillator stabilise
+  Serial.println("ETH: GPIO17 HIGH (oscillator on)");
+
+  // IDF v5 marks GPIO0 as reserved (strapping pin). Pre-revoke it so
+  // emac_esp_iomux_rmii_clk_input() can configure the IOMUX function.
   esp_gpio_revoke(BIT64(GPIO_NUM_0));
   Serial.println("ETH: GPIO0 reservation revoked");
 
-  // Let the ETH driver manage GPIO17 (oscillator enable) via the power parameter.
-  // Factory firmware (IDF v4.4) passes power=17 to ETH.begin and it works.
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
+  // power=-1: don't let IDF touch GPIO17
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
-            OSC_EN_PIN, ETH_CLK_MODE);
-  Serial.println("ETH: ETH.begin() called with power=17");
+            -1, ETH_CLK_MODE);
+  Serial.println("ETH: ETH.begin() called with power=-1");
 
-  // Force GPIO0 IOMUX to EMAC clock input function (IDF v5 reservation bug workaround).
-  // emac_esp_iomux_rmii_clk_input() may skip this if its internal esp_gpio_revoke()
-  // fails — leaving EMAC with no clock → zero TX.
-  // Write IO_MUX register directly: set MCU_SEL=5 (FUNC_GPIO0_EMAC_TX_CLK), enable
-  // input (IE=1), disable output enable (OE=0). No GPIO matrix involvement needed
-  // for IOMUX — signal goes directly from pin to EMAC peripheral.
-  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);  // func=5
+  // Force GPIO0 IOMUX to EMAC clock input (func=5), no pull resistors.
+  // emac_esp_iomux_rmii_clk_input() may silently skip this if its internal
+  // revoke fails — writing the register directly guarantees it.
+  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
   PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
-  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);  // disable pulldown
-  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);  // disable pullup — float for clean clock
-  uint32_t iomux_val = REG_READ(IO_MUX_GPIO0_REG);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
   Serial.printf("ETH: GPIO0 IO_MUX=0x%08x  MCU_SEL=%d (want 5)  GPIO17=%d\n",
-                iomux_val,
+                REG_READ(IO_MUX_GPIO0_REG),
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
-                (int)digitalRead(17));
+                (int)digitalRead(OSC_EN_PIN));
 }
 
 void loop() {
