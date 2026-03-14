@@ -60,8 +60,8 @@ void setup() {
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
   // Pass power=-1: we manage GPIO17 ourselves above, driver must not touch it.
-  ETH.begin(ETH_PHY_ADDR, -1, ETH_PHY_MDC, ETH_PHY_MDIO,
-            ETH_PHY_TYPE, ETH_CLK_MODE);
+  ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
+            -1, ETH_CLK_MODE);
 }
 
 void loop() {
