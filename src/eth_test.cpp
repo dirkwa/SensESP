@@ -9,7 +9,9 @@
 #include <ETH.h>
 #include <WiFi.h>
 #include "driver/gpio.h"
-#include "esp_private/esp_gpio_reserve.h"  // esp_gpio_revoke()
+#include "esp_private/esp_gpio_reserve.h"   // esp_gpio_revoke()
+#include "esp_private/gpio.h"               // gpio_iomux_input()
+#include "soc/io_mux_reg.h"                 // FUNC_GPIO0_EMAC_TX_CLK, IO_MUX_GPIO0_REG
 
 #define OSC_EN_PIN 17
 
@@ -63,6 +65,13 @@ void setup() {
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             OSC_EN_PIN, ETH_CLK_MODE);
   Serial.println("ETH: ETH.begin() called with power=17");
+
+  // Force GPIO0 IOMUX to EMAC clock input function (IDF v5 reservation bug workaround).
+  // emac_esp_iomux_rmii_clk_input() may skip gpio_iomux_input() if its internal
+  // esp_gpio_revoke() fails — leaving EMAC with no clock → zero TX.
+  // Calling this after ETH.begin() overrides whatever the driver left in place.
+  gpio_iomux_input(GPIO_NUM_0, FUNC_GPIO0_EMAC_TX_CLK, 0);
+  Serial.println("ETH: GPIO0 IOMUX forced to EMAC_TX_CLK (func=5)");
 }
 
 void loop() {
