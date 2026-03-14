@@ -104,24 +104,14 @@ class EthernetProvisioner {
              config.power, config.clk_mode);
 
     // GPIO17 = 50MHz crystal oscillator enable on Aptinex IsolPoE.
-    // Always manage ourselves, pass power=-1 to ETH.begin() so driver never
-    // touches it. On POWERON pulse LOW to reset PHY then HIGH for oscillator.
-    // On SW reset oscillator is already running, just ensure HIGH.
+    // Drive HIGH and pass power=-1 to ETH.begin() — driver must never touch
+    // this pin. The LAN8720 has its own internal power-on reset circuit.
     int power_for_driver = -1;
     if (config.power >= 0) {
       pinMode(config.power, OUTPUT);
-      if (reset_reason == ESP_RST_POWERON) {
-        ESP_LOGI(__FILENAME__, "POWERON: PHY reset pulse on GPIO%d", config.power);
-        digitalWrite(config.power, LOW);
-        delay(10);
-        digitalWrite(config.power, HIGH);
-        delay(50);
-      } else {
-        ESP_LOGI(__FILENAME__, "SW reset: ensuring GPIO%d HIGH", config.power);
-        digitalWrite(config.power, HIGH);
-        delay(10);
-      }
+      digitalWrite(config.power, HIGH);
       ESP_LOGI(__FILENAME__, "PHY oscillator enabled on GPIO%d", config.power);
+      delay(50);
     }
 
     // Ensure GPIO0 (RMII clock input) is clean before ETH.begin() claims it.
