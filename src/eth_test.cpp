@@ -142,9 +142,18 @@ void loop() {
                     (int)((des0 >> 31) & 1),
                     (int)((des0 >> 15) & 1));
     }
-    // Poke TX poll demand to wake DMA from suspended state
+    // TX_CURR_DESC is wandering through random heap (not the real ring at TX_LIST_BASE).
+    // Reset DMA TX: stop it, point back to TX_LIST_BASE, restart.
+    uint32_t opmode = REG_READ(0x3FF69018);
+    // Clear ST bit (bit 13) to stop TX DMA
+    REG_WRITE(0x3FF69018, opmode & ~(1u << 13));
+    // Reset TX list pointer to the base
+    REG_WRITE(0x3FF69010, dma_tx_list);
+    // Re-set ST bit to restart TX DMA
+    REG_WRITE(0x3FF69018, opmode | (1u << 13));
+    // Poll demand to kick it
     REG_WRITE(0x3FF69004, 1);
-    Serial.printf("  TX poll demand written\n");
+    Serial.printf("  DMA TX reset to TX_LIST_BASE, poll demand written\n");
 
   }
 }
