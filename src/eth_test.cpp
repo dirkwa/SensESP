@@ -14,6 +14,7 @@
 #include "driver/gpio.h"
 #include "esp_private/esp_gpio_reserve.h"   // esp_gpio_revoke()
 #include "soc/io_mux_reg.h"                 // FUNC_GPIO0_EMAC_TX_CLK, IO_MUX_GPIO0_REG
+#include "esp_eth_driver.h"                 // ETH_CMD_READ_PHY_REG
 
 #define OSC_EN_PIN 17
 
@@ -96,5 +97,18 @@ void loop() {
                   (int)ETH.hasIP(),
                   ETH.localIP().toString().c_str(),
                   ETH.macAddress().c_str());
+
+    // Read LAN8720 PHY registers via MDIO to check actual PHY state.
+    // REG 0 = Basic Control, REG 1 = Basic Status, REG 31 = Special Control/Status
+    esp_eth_handle_t h = ETH.handle();
+    if (h) {
+      for (uint32_t reg : {0u, 1u, 31u}) {
+        esp_eth_phy_reg_rw_data_t rw = {.reg_addr = reg, .reg_value_p = nullptr};
+        uint32_t val = 0xFFFF;
+        rw.reg_value_p = &val;
+        esp_eth_ioctl(h, ETH_CMD_READ_PHY_REG, &rw);
+        Serial.printf("  PHY reg%02u = 0x%04x\n", reg, val);
+      }
+    }
   }
 }
