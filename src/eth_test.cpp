@@ -84,34 +84,21 @@ void setup() {
   delay(50);
   Serial.println("ETH: PHY reset done");
 
-  // Step 4: Launch a high-priority task that continuously re-applies the GPIO0
-  // IOMUX during ETH.begin(). ETH.begin() calls perimanClearPinBus(GPIO0) which
-  // resets the IOMUX mid-init; the EMAC clock-lock then fails. By hammering the
-  // IOMUX from a parallel task we ensure GPIO0 stays as EMAC RMII clock input
-  // throughout the entire init sequence.
-  volatile bool eth_begin_done = false;
-  xTaskCreatePinnedToCore([](void* arg) {
-    volatile bool* done = (volatile bool*)arg;
-    while (!*done) {
-      esp_gpio_revoke(BIT64(GPIO_NUM_0));
-      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
-      PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
-      CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
-      CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-      vTaskDelay(1);  // yield briefly
-    }
-    vTaskDelete(NULL);
-  }, "iomux_guard", 2048, (void*)&eth_begin_done, configMAX_PRIORITIES - 1, NULL, 0);
-
+  // Step 4: start Ethernet — power=-1 so IDF leaves GPIO17 alone.
+  // ETH.begin() internally calls perimanClearPinBus(GPIO0) which resets the
+  // IOMUX. We pre-configure it above and re-apply it immediately after.
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
-  eth_begin_done = true;  // stop the guard task
 
-  delay(10);  // let guard task exit
-  gpio0_as_rmii_clk();  // final re-apply
+  // Re-apply IOMUX immediately after ETH.begin() and wait for DMA to init.
+  for (int i = 0; i < 500; i++) {
+    gpio0_as_rmii_clk();
+    if (REG_READ(0x3FF69010) != 0) break;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
   Serial.printf("ETH: GPIO0 IOMUX after ETH.begin  MCU_SEL=%d  GPIO17=%d  TX_LIST=0x%08x\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
                 (int)digitalRead(PHY_RST_PIN),
@@ -149,6 +136,15 @@ void setup() {
 }
 
 void loop() {
+  // Kick TX DMA every 100ms — if suspended (TX_STATE=6) and there's a pending
+  // packet (OWN=1 somewhere), poll demand wakes it up.
+  static unsigned long last_kick = 0;
+  if (millis() - last_kick > 100) {
+    last_kick = millis();
+    uint32_t st = (REG_READ(0x3FF69014) >> 20) & 0x7;
+    if (st == 6) REG_WRITE(0x3FF69004, 1);
+  }
+
   static unsigned long last = 0;
   if (millis() - last > 5000) {
     last = millis();
@@ -171,10 +167,6 @@ void loop() {
       uint32_t d3 = *((volatile uint32_t*)(dma_tx_curr + 12));
       Serial.printf("  TX_CURR desc: DES0=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
                     d0, d2, d3, (int)(d0 >> 31));
-    }
-    // Kick TX DMA — if suspended (TX_STATE=6), issue poll demand to wake it.
-    if (((dma_status >> 20) & 0x7) == 6) {
-      REG_WRITE(0x3FF69004, 1);
     }
     // Dump lwIP netif list + DHCP state
     for (struct netif* nif = netif_list; nif != NULL; nif = nif->next) {
