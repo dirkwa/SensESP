@@ -70,7 +70,8 @@ void onEvent(arduino_event_id_t event) {
       break;
     }
     case ARDUINO_EVENT_ETH_CONNECTED:
-      Serial.println("ETH: Link up");
+      Serial.printf("ETH: Link up  TX_LIST=0x%08x  RX_LIST=0x%08x  OP_MODE=0x%08x\n",
+                    REG_READ(0x3FF69010), REG_READ(0x3FF6900C), REG_READ(0x3FF69018));
       break;
     case ARDUINO_EVENT_ETH_GOT_IP:
       Serial.printf("ETH: Got IP: %s  MAC: %s\n",
