@@ -102,6 +102,35 @@ void setup() {
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
                 (int)digitalRead(PHY_RST_PIN),
                 REG_READ(0x3FF69010));
+
+  // Step 6: walk the TX descriptor ring and fix any DES3 (next descriptor
+  // pointer) that points outside the descriptor ring (into heap/lwIP buffers).
+  // The last descriptor's DES3 must wrap back to TX_LIST_BASE.
+  uint32_t tx_base = REG_READ(0x3FF69010);
+  if (tx_base != 0) {
+    // Find the last descriptor in the ring (DES3 points outside DRAM or wraps)
+    uint32_t desc = tx_base;
+    uint32_t prev = 0;
+    int count = 0;
+    while (count < 64) {
+      volatile uint32_t* d = (volatile uint32_t*)desc;
+      uint32_t des3 = d[3];
+      if (des3 == tx_base) { // normal ring end
+        break;
+      }
+      if (des3 < 0x3FF80000 || des3 > 0x3FFFFFFF) {
+        // DES3 points outside valid descriptor SRAM — this is the broken link
+        Serial.printf("ETH: fixing broken TX ring: desc@0x%08x DES3=0x%08x -> 0x%08x\n",
+                      desc, des3, tx_base);
+        d[3] = tx_base;
+        break;
+      }
+      prev = desc;
+      desc = des3;
+      count++;
+    }
+    Serial.printf("ETH: TX ring walk done (%d descriptors)\n", count);
+  }
 }
 
 void loop() {
