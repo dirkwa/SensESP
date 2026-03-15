@@ -136,45 +136,12 @@ void setup() {
 }
 
 void loop() {
-  static unsigned long last_restart = 0;
-
-  // Watchdog 1: EMAC failed to init (TX_LIST=0 for >10s) — restart
-  if (REG_READ(0x3FF69010) == 0 && millis() > 10000 && millis() - last_restart > 10000) {
-    last_restart = millis();
-    Serial.println("ETH: EMAC not initialized — restarting");
-    ETH.end();
-    delay(500);
-    gpio0_as_rmii_clk();
-    ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
-              -1, ETH_CLK_MODE);
-    for (int i = 0; i < 500; i++) {
-      gpio0_as_rmii_clk();
-      if (REG_READ(0x3FF69010) != 0) break;
-      vTaskDelay(pdMS_TO_TICKS(2));
-    }
-    Serial.printf("ETH: restarted TX_LIST=0x%08x\n", REG_READ(0x3FF69010));
-    return;
-  }
-
-  // Watchdog 2: TX_CURR on corrupt descriptor — restart EMAC
-  uint32_t tx_curr = REG_READ(0x3FF69050);
-  if (tx_curr >= 0x3FF00000 && tx_curr <= 0x3FFFFFFF) {
-    uint32_t des0 = *((volatile uint32_t*)tx_curr);
-    if (des0 == 0xffffffff && millis() - last_restart > 3000) {
-      last_restart = millis();
-      Serial.println("ETH: TX stuck on corrupt desc — restarting EMAC");
-      ETH.end();
-      delay(200);
-      gpio0_as_rmii_clk();
-      ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
-                -1, ETH_CLK_MODE);
-      for (int i = 0; i < 500; i++) {
-        gpio0_as_rmii_clk();
-        if (REG_READ(0x3FF69010) != 0) break;
-        vTaskDelay(pdMS_TO_TICKS(2));
-      }
-      Serial.printf("ETH: restarted TX_LIST=0x%08x\n", REG_READ(0x3FF69010));
-    }
+  // Watchdog: hard-reset via esp_restart() rather than ETH.end()/ETH.begin()
+  // to avoid leaking the EMAC interrupt on repeated restarts.
+  if (millis() > 12000 && !ETH.linkUp()) {
+    Serial.println("ETH: no link after 12s — hard reset");
+    delay(100);
+    esp_restart();
   }
 
   static unsigned long last = 0;
