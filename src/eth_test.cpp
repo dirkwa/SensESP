@@ -19,6 +19,7 @@
 #include "soc/io_mux_reg.h"
 #include "soc/gpio_reg.h"
 #include "lwip/netif.h"
+#include "lwip/dhcp.h"
 
 #define PHY_RST_PIN 17
 
@@ -118,7 +119,7 @@ void setup() {
       if (des3 == tx_base) { // normal ring end
         break;
       }
-      if (des3 < 0x3FF80000 || des3 > 0x3FFFFFFF) {
+      if (des3 < 0x3FF00000 || des3 > 0x3FFFFFFF) {
         // DES3 points outside valid descriptor SRAM — this is the broken link
         Serial.printf("ETH: fixing broken TX ring: desc@0x%08x DES3=0x%08x -> 0x%08x\n",
                       desc, des3, tx_base);
@@ -157,12 +158,16 @@ void loop() {
       Serial.printf("  TX_CURR desc: DES0=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
                     d0, d2, d3, (int)(d0 >> 31));
     }
-    // Dump lwIP netif list
+    // Dump lwIP netif list + DHCP state
     for (struct netif* nif = netif_list; nif != NULL; nif = nif->next) {
       Serial.printf("  netif %c%c%d  flags=0x%02x  ip=%s\n",
                     nif->name[0], nif->name[1], nif->num,
                     nif->flags,
                     ip4addr_ntoa(&nif->ip_addr.u_addr.ip4));
+      struct dhcp* d = netif_dhcp_data(nif);
+      if (d) {
+        Serial.printf("    DHCP state=%d tries=%d\n", (int)d->state, (int)d->tries);
+      }
     }
   }
 }
