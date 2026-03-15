@@ -29,7 +29,7 @@ static bool eth_connected = false;
 
 void onEvent(arduino_event_id_t event) {
   switch (event) {
-    case ARDUINO_EVENT_ETH_START:
+    case ARDUINO_EVENT_ETH_START: {
       // perimanClearPinBus() inside ETH.begin() resets GPIO0 IOMUX before
       // this event fires. Re-apply it here so the clock is present when
       // emac_esp32_start() allocates DMA descriptors and starts the engine.
@@ -40,8 +40,23 @@ void onEvent(arduino_event_id_t event) {
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
       Serial.printf("ETH: Started (IOMUX re-applied, MCU_SEL=%d)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
+      // Raw MDIO read of PHY addr=1, reg=2 (PHY ID1) using EMAC MAC registers.
+      // EMAC_MAC_MII_ADDR_REG=0x3FF6C010: [15:11]=PHY_addr [10:6]=MII_reg [1]=busy [0]=write
+      // EMAC_MAC_MII_DATA_REG=0x3FF6C014
+      // MDIO clock divider: bits[4:2] = CR — use 010 = div42 for 80MHz APB -> ~2MHz MDIO
+      REG_WRITE(0x3FF6C010, (1 << 11) | (2 << 6) | (2 << 2) | (1 << 1)); // addr=1,reg=2,CR=2,busy
+      uint32_t t = millis();
+      while ((REG_READ(0x3FF6C010) & 0x2) && (millis() - t < 10)) {}
+      uint32_t phy_id1 = REG_READ(0x3FF6C014);
+      REG_WRITE(0x3FF6C010, (1 << 11) | (3 << 6) | (2 << 2) | (1 << 1)); // addr=1,reg=3,CR=2,busy
+      t = millis();
+      while ((REG_READ(0x3FF6C010) & 0x2) && (millis() - t < 10)) {}
+      uint32_t phy_id2 = REG_READ(0x3FF6C014);
+      Serial.printf("ETH: MDIO PHY ID1=0x%04x  ID2=0x%04x (expect 0x0007 0xC0F0 for LAN8720)\n",
+                    phy_id1 & 0xFFFF, phy_id2 & 0xFFFF);
       ETH.setHostname("eth-test");
       break;
+    }
     case ARDUINO_EVENT_ETH_CONNECTED:
       Serial.println("ETH: Link up");
       break;
