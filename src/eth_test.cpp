@@ -36,7 +36,7 @@ void onEvent(arduino_event_id_t event) {
       // This event fires after esp_eth_start() returns (DMA already running),
       // so this re-apply is just a safety belt.
       esp_gpio_revoke(BIT64(GPIO_NUM_0));
-      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
+      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_CLK_OUT1);
       PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
@@ -108,7 +108,7 @@ void setup() {
   // Pre-apply GPIO0 IOMUX so the clock is present from the start.
   // lib/Ethernet/ETH.cpp re-applies it after perimanClearPinBus() resets it.
   esp_gpio_revoke(BIT64(GPIO_NUM_0));
-  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
+  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_CLK_OUT1);
   PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);

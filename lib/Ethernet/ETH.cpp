@@ -36,7 +36,7 @@
 #endif /* __has_include("soc/emac_ext_struct.h" */
 #include "soc/rtc.h"
 #if CONFIG_IDF_TARGET_ESP32
-#include "esp_private/eth_mac_esp_gpio.h"
+#include "soc/io_mux_reg.h"
 #endif /* CONFIG_IDF_TARGET_ESP32 */
 #endif /* CONFIG_ETH_USE_ESP32_EMAC */
 #include "esp32-hal-periman.h"
@@ -244,10 +244,15 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
 #if CONFIG_IDF_TARGET_ESP32
   // perimanClearPinBus() resets GPIO0 IOMUX to GPIO function, which kills the
   // external 50MHz RMII clock input before the EMAC DMA software reset loop.
-  // Re-apply the RMII clock IOMUX immediately so the clock is present when
+  // Re-apply the RMII clock IOMUX directly so the clock is present when
   // emac_esp32_init() polls for the DMA sw_rst bit to clear.
+  // FUNC_GPIO0_CLK_OUT1=1 is the IOMUX function for EMAC external clock input.
+  // FUN_IE (bit 9) enables the input buffer.
   if (clock_mode == ETH_CLOCK_GPIO0_IN) {
-    emac_esp_iomux_rmii_clk_input(EMAC_CLK_IN_GPIO);
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
+    PIN_INPUT_ENABLE(PERIPHS_IO_MUX_GPIO0_U);
+    CLEAR_PERI_REG_MASK(PERIPHS_IO_MUX_GPIO0_U, FUN_PD);
+    CLEAR_PERI_REG_MASK(PERIPHS_IO_MUX_GPIO0_U, FUN_PU);
   }
 #endif /* CONFIG_IDF_TARGET_ESP32 */
   if (!perimanClearPinBus(_pin_mcd)) {
