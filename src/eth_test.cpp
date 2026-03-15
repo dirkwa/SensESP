@@ -116,21 +116,22 @@ void setup() {
     while (count < 64) {
       volatile uint32_t* d = (volatile uint32_t*)desc;
       uint32_t des3 = d[3];
-      if (des3 == tx_base) { // normal ring end
+      if (des3 == tx_base) { // already a good ring
+        Serial.printf("ETH: TX ring already good (%d descriptors)\n", count);
         break;
       }
       if (des3 < 0x3FF00000 || des3 > 0x3FFFFFFF) {
-        // DES3 points outside valid descriptor SRAM — this is the broken link
-        Serial.printf("ETH: fixing broken TX ring: desc@0x%08x DES3=0x%08x -> 0x%08x\n",
+        // DES3 is null/invalid — this is the last descriptor, fix it to wrap
+        Serial.printf("ETH: fixing TX ring end: desc@0x%08x DES3=0x%08x -> 0x%08x\n",
                       desc, des3, tx_base);
         d[3] = tx_base;
+        Serial.printf("ETH: TX ring fixed (%d descriptors)\n", count + 1);
         break;
       }
       prev = desc;
       desc = des3;
       count++;
     }
-    Serial.printf("ETH: TX ring walk done (%d descriptors)\n", count);
   }
 }
 
