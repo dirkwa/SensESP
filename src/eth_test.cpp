@@ -40,6 +40,13 @@ void onEvent(arduino_event_id_t event) {
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
       Serial.printf("ETH: Started (IOMUX re-applied, MCU_SEL=%d)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
+      // Check GPIO18 (MDIO) and GPIO23 (MDC) IOMUX state: MCU_SEL=2 = GPIO matrix
+      Serial.printf("ETH: GPIO18(MDIO) IOMUX=0x%08x MCU_SEL=%d\n",
+                    REG_READ(IO_MUX_GPIO18_REG),
+                    (int)REG_GET_FIELD(IO_MUX_GPIO18_REG, MCU_SEL));
+      Serial.printf("ETH: GPIO23(MDC)  IOMUX=0x%08x MCU_SEL=%d\n",
+                    REG_READ(IO_MUX_GPIO23_REG),
+                    (int)REG_GET_FIELD(IO_MUX_GPIO23_REG, MCU_SEL));
       // Raw MDIO read of PHY addr=1, reg=2 (PHY ID1) using EMAC MAC registers.
       // EMAC_MAC_MII_ADDR_REG=0x3FF6C010: [15:11]=PHY_addr [10:6]=MII_reg [1]=busy [0]=write
       // EMAC_MAC_MII_DATA_REG=0x3FF6C014
