@@ -21,34 +21,24 @@
 #include "lwip/dhcp.h"
 #include "esp_system.h"
 #include "rom/rtc.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 #define PHY_RST_PIN 17  // only used when ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
-
-// Task that continuously re-applies the GPIO0 IOMUX setting during ETH.begin().
-// ETH.begin() calls perimanClearPinBus(0) which resets GPIO0 to GPIO function,
-// breaking the RMII clock input. This task fights it back until DMA is up.
-static TaskHandle_t iomux_guard_task = NULL;
-static void iomux_guard(void*) {
-  while (REG_READ(0x3FF69010) == 0) {  // while TX_LIST_BASE == 0
-    esp_gpio_revoke(BIT64(GPIO_NUM_0));
-    REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
-    PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
-    CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
-    CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-    vTaskDelay(1);  // yield but stay hot
-  }
-  Serial.printf("ETH: iomux_guard done, TX_LIST=0x%08x\n", REG_READ(0x3FF69010));
-  vTaskDelete(NULL);
-}
 
 static bool eth_connected = false;
 
 void onEvent(arduino_event_id_t event) {
   switch (event) {
     case ARDUINO_EVENT_ETH_START:
-      Serial.println("ETH: Started");
+      // perimanClearPinBus() inside ETH.begin() resets GPIO0 IOMUX before
+      // this event fires. Re-apply it here so the clock is present when
+      // emac_esp32_start() allocates DMA descriptors and starts the engine.
+      esp_gpio_revoke(BIT64(GPIO_NUM_0));
+      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
+      PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
+      CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
+      CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
+      Serial.printf("ETH: Started (IOMUX re-applied, MCU_SEL=%d)\n",
+                    (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
       ETH.setHostname("eth-test");
       break;
     case ARDUINO_EVENT_ETH_CONNECTED:
@@ -116,20 +106,9 @@ void setup() {
                 esp_get_free_heap_size(),
                 heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
 
-#if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
-  // Launch IOMUX guard task before ETH.begin(): ETH.begin() calls
-  // perimanClearPinBus(0) which resets GPIO0 IOMUX, losing the RMII clock.
-  // The guard task continuously re-applies MCU_SEL=EMAC until DMA is up.
-  xTaskCreatePinnedToCore(iomux_guard, "iomux_guard", 2048, NULL,
-                          configMAX_PRIORITIES - 1, &iomux_guard_task, 1);
-#endif
-
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
-
-  // Wait for iomux_guard to finish (it deletes itself once TX_LIST != 0)
-  vTaskDelay(pdMS_TO_TICKS(500));
   Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
                 REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
 
