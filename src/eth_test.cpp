@@ -21,6 +21,7 @@
 #include "lwip/dhcp.h"
 #include "esp_system.h"
 #include "rom/rtc.h"
+#include "soc/dport_access.h"
 
 #define PHY_RST_PIN 17  // only used when ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
 
@@ -105,6 +106,14 @@ void setup() {
   Serial.printf("ETH: free heap=%u  largest_block=%u\n",
                 esp_get_free_heap_size(),
                 heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
+
+  // Check EMAC peripheral clock and reset state before ETH.begin()
+  // DPORT_WIFI_CLK_EN_REG=0x3FF000F4, DPORT_CORE_RST_EN_REG=0x3FF000E0
+  // EMAC_EXT base=0x3FF69800: +0=PHYINF_CONF, +4=CLK_CTRL
+  Serial.printf("ETH: DPORT CLK_EN=0x%08x  RST_EN=0x%08x\n",
+                DPORT_REG_READ(0x3FF000F4), DPORT_REG_READ(0x3FF000E0));
+  Serial.printf("ETH: EMAC_EX PHYINF=0x%08x  CLK_CTRL=0x%08x\n",
+                REG_READ(0x3FF69800), REG_READ(0x3FF69804));
 
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
