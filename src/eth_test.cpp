@@ -4,14 +4,22 @@
 //   LOW  → PHY in reset, oscillator off
 //   HIGH → PHY running, oscillator on
 //
-// IDF v5 uses the power pin as PHY nRST: pulses it LOW then HIGH.
-// That is exactly what GPIO17 needs — pass power=17 to ETH.begin() and let
-// IDF handle the reset sequence. The oscillator comes up together with the PHY.
+// The LAN8720 requires REFCLK (50MHz) to be present DURING its reset sequence
+// for RMII to initialise correctly. GPIO17 controls both the oscillator and the
+// PHY reset, so we cannot use IDF's built-in reset pulse (which drives GPIO17
+// LOW, killing the clock). Instead:
+//   1. Enable oscillator (GPIO17 HIGH) and let it stabilise.
+//   2. Manually pulse nRST by briefly driving GPIO17 LOW then HIGH again,
+//      keeping the pulse short enough that the oscillator recovers before the
+//      PHY samples REFCLK.
+//   3. Call ETH.begin() with power=-1 so IDF does not touch GPIO17 again.
 //
 // ETH_CLK_MODE = ETH_CLOCK_GPIO0_IN: 50MHz clock from oscillator into GPIO0.
 
 #include <ETH.h>
 #include <WiFi.h>
+
+#define PHY_RST_PIN 17
 
 static bool eth_connected = false;
 
@@ -48,12 +56,26 @@ void setup() {
   delay(200);
   Serial.println("\nAptinex IsolPoE ETH test starting...");
 
+  // Step 1: enable oscillator and let it stabilise.
+  pinMode(PHY_RST_PIN, OUTPUT);
+  digitalWrite(PHY_RST_PIN, HIGH);
+  delay(50);
+  Serial.println("ETH: oscillator on");
+
+  // Step 2: brief reset pulse — LOW for 10ms then HIGH.
+  // Oscillator recovers in ~1ms; LAN8720 nRST min pulse is 100us.
+  // With REFCLK present during de-assertion the PHY initialises RMII correctly.
+  digitalWrite(PHY_RST_PIN, LOW);
+  delay(10);
+  digitalWrite(PHY_RST_PIN, HIGH);
+  delay(50);  // wait for PHY to complete internal reset
+  Serial.println("ETH: PHY reset done");
+
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
-  // power=17: IDF v5 pulses GPIO17 LOW (reset) then HIGH (run), which also
-  // enables the oscillator before the EMAC clock is needed.
+  // power=-1: IDF must not touch GPIO17 again after our manual reset.
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
-            17, ETH_CLK_MODE);
+            -1, ETH_CLK_MODE);
 }
 
 void loop() {
