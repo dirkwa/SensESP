@@ -18,6 +18,7 @@
 #include "esp_private/esp_gpio_reserve.h"
 #include "soc/io_mux_reg.h"
 #include "soc/gpio_reg.h"
+#include "lwip/netif.h"
 
 #define PHY_RST_PIN 17
 
@@ -85,6 +86,7 @@ void setup() {
   // Step 4: start Ethernet — power=-1 so IDF leaves GPIO17 alone.
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
+  Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
 
@@ -118,6 +120,13 @@ void loop() {
       uint32_t d3 = *((volatile uint32_t*)(dma_tx_curr + 12));
       Serial.printf("  TX_CURR desc: DES0=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
                     d0, d2, d3, (int)(d0 >> 31));
+    }
+    // Dump lwIP netif list
+    for (struct netif* nif = netif_list; nif != NULL; nif = nif->next) {
+      Serial.printf("  netif %c%c%d  flags=0x%02x  ip=%s\n",
+                    nif->name[0], nif->name[1], nif->num,
+                    nif->flags,
+                    ip4addr_ntoa(&nif->ip_addr.u_addr.ip4));
     }
   }
 }
