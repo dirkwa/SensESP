@@ -5,19 +5,18 @@
 //   HIGH → PHY running, oscillator on
 //
 // The LAN8720 requires REFCLK (50MHz) to be present DURING its reset sequence
-// for RMII to initialise correctly. GPIO17 controls both the oscillator and the
-// PHY reset, so we cannot use IDF's built-in reset pulse (which drives GPIO17
-// LOW, killing the clock). Instead:
+// for RMII to initialise correctly. Sequence:
 //   1. Enable oscillator (GPIO17 HIGH) and let it stabilise.
-//   2. Manually pulse nRST by briefly driving GPIO17 LOW then HIGH again,
-//      keeping the pulse short enough that the oscillator recovers before the
-//      PHY samples REFCLK.
-//   3. Call ETH.begin() with power=-1 so IDF does not touch GPIO17 again.
-//
-// ETH_CLK_MODE = ETH_CLOCK_GPIO0_IN: 50MHz clock from oscillator into GPIO0.
+//   2. Pre-configure GPIO0 IOMUX as EMAC RMII clock input so the clock is
+//      present before ETH.begin() starts the EMAC.
+//   3. Pulse nRST (GPIO17 LOW→HIGH briefly) with clock running.
+//   4. Call ETH.begin() with power=-1 so IDF does not touch GPIO17 again.
+//   5. Re-apply GPIO0 IOMUX after ETH.begin() in case it was reset.
 
 #include <ETH.h>
 #include <WiFi.h>
+#include "esp_private/esp_gpio_reserve.h"
+#include "soc/io_mux_reg.h"
 
 #define PHY_RST_PIN 17
 
@@ -51,6 +50,14 @@ void onEvent(arduino_event_id_t event) {
   }
 }
 
+static void gpio0_as_rmii_clk() {
+  esp_gpio_revoke(BIT64(GPIO_NUM_0));
+  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
+  PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -62,20 +69,29 @@ void setup() {
   delay(50);
   Serial.println("ETH: oscillator on");
 
-  // Step 2: brief reset pulse — LOW for 10ms then HIGH.
-  // Oscillator recovers in ~1ms; LAN8720 nRST min pulse is 100us.
-  // With REFCLK present during de-assertion the PHY initialises RMII correctly.
+  // Step 2: configure GPIO0 as RMII clock input while oscillator is running.
+  gpio0_as_rmii_clk();
+  Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d\n",
+                (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
+
+  // Step 3: pulse PHY reset with clock present.
   digitalWrite(PHY_RST_PIN, LOW);
   delay(10);
   digitalWrite(PHY_RST_PIN, HIGH);
-  delay(50);  // wait for PHY to complete internal reset
+  delay(50);
   Serial.println("ETH: PHY reset done");
 
+  // Step 4: start Ethernet — power=-1 so IDF leaves GPIO17 alone.
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
-  // power=-1: IDF must not touch GPIO17 again after our manual reset.
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
+
+  // Step 5: re-apply in case ETH.begin() reset the IOMUX.
+  gpio0_as_rmii_clk();
+  Serial.printf("ETH: GPIO0 IOMUX after ETH.begin  MCU_SEL=%d  GPIO17=%d\n",
+                (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
+                (int)digitalRead(PHY_RST_PIN));
 }
 
 void loop() {
