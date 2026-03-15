@@ -93,6 +93,9 @@ void setup() {
 
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
+  Serial.printf("ETH: free heap=%u  largest_block=%u\n",
+                esp_get_free_heap_size(),
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
