@@ -84,21 +84,34 @@ void setup() {
   delay(50);
   Serial.println("ETH: PHY reset done");
 
-  // Step 4: start Ethernet — power=-1 so IDF leaves GPIO17 alone.
+  // Step 4: Launch a high-priority task that continuously re-applies the GPIO0
+  // IOMUX during ETH.begin(). ETH.begin() calls perimanClearPinBus(GPIO0) which
+  // resets the IOMUX mid-init; the EMAC clock-lock then fails. By hammering the
+  // IOMUX from a parallel task we ensure GPIO0 stays as EMAC RMII clock input
+  // throughout the entire init sequence.
+  volatile bool eth_begin_done = false;
+  xTaskCreatePinnedToCore([](void* arg) {
+    volatile bool* done = (volatile bool*)arg;
+    while (!*done) {
+      esp_gpio_revoke(BIT64(GPIO_NUM_0));
+      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
+      PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
+      CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
+      CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
+      vTaskDelay(1);  // yield briefly
+    }
+    vTaskDelete(NULL);
+  }, "iomux_guard", 2048, (void*)&eth_begin_done, configMAX_PRIORITIES - 1, NULL, 0);
+
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
+  eth_begin_done = true;  // stop the guard task
 
-  // Step 5: ETH.begin() calls perimanClearPinBus(GPIO0) which resets IOMUX.
-  // Re-apply immediately AND keep polling until the EMAC DMA list is non-zero,
-  // which confirms the EMAC driver has started and is using the clock.
-  for (int i = 0; i < 200; i++) {  // up to 2 seconds
-    gpio0_as_rmii_clk();
-    if (REG_READ(0x3FF69010) != 0) break;
-    delay(10);
-  }
+  delay(10);  // let guard task exit
+  gpio0_as_rmii_clk();  // final re-apply
   Serial.printf("ETH: GPIO0 IOMUX after ETH.begin  MCU_SEL=%d  GPIO17=%d  TX_LIST=0x%08x\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
                 (int)digitalRead(PHY_RST_PIN),
