@@ -48,19 +48,19 @@ void onEvent(arduino_event_id_t event) {
                     REG_READ(IO_MUX_GPIO23_REG),
                     (int)REG_GET_FIELD(IO_MUX_GPIO23_REG, MCU_SEL));
       // Raw MDIO read of PHY addr=1, regs 2+3 (PHY ID1+ID2) via EMAC MAC registers.
-      // MAC block is at DMA_BASE+0x1000 = 0x3FF6A000
-      // emacgmiiaddr = +0x10 = 0x3FF6A010: [15:11]=PHY_addr [10:6]=MII_reg [4:2]=CR [1]=busy [0]=write
-      // emacmiidata  = +0x14 = 0x3FF6A014
-      // CR=010 → div42 for 80MHz APB → ~1.9MHz MDIO clock
+      // MAC block at 0x3FF6A000; emacgmiiaddr=+0x10, emacmiidata=+0x14
+      // bit0=miibusy, bit1=miiwrite, bits[5:2]=CR, bits[10:6]=miireg, bits[15:11]=miidev
+      // CR=0 → div42 for 80MHz APB → ~1.9MHz MDIO
       #define EMAC_GMIIADDR 0x3FF6A010
       #define EMAC_GMIIDATA 0x3FF6A014
-      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(2<<6)|(2<<2)|(1<<1)); // PHY=1,reg=2,CR=2,start
+      // read: miiwrite=0, miibusy=1
+      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(2<<6)|(0<<2)|(0<<1)|(1<<0)); // PHY=1,reg=2,CR=0,read,busy
       uint32_t t = millis();
-      while ((REG_READ(EMAC_GMIIADDR) & 0x2) && (millis()-t < 10)) {}
+      while ((REG_READ(EMAC_GMIIADDR) & 0x1) && (millis()-t < 10)) {}
       uint32_t phy_id1 = REG_READ(EMAC_GMIIDATA);
-      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(3<<6)|(2<<2)|(1<<1)); // PHY=1,reg=3,CR=2,start
+      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(3<<6)|(0<<2)|(0<<1)|(1<<0)); // PHY=1,reg=3,CR=0,read,busy
       t = millis();
-      while ((REG_READ(EMAC_GMIIADDR) & 0x2) && (millis()-t < 10)) {}
+      while ((REG_READ(EMAC_GMIIADDR) & 0x1) && (millis()-t < 10)) {}
       uint32_t phy_id2 = REG_READ(EMAC_GMIIDATA);
       Serial.printf("ETH: MDIO PHY ID1=0x%04x  ID2=0x%04x (expect 0x0007 0xC0F0 for LAN8720)\n",
                     phy_id1 & 0xFFFF, phy_id2 & 0xFFFF);
