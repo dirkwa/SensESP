@@ -90,11 +90,18 @@ void setup() {
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
 
-  // Step 5: re-apply in case ETH.begin() reset the IOMUX.
-  gpio0_as_rmii_clk();
-  Serial.printf("ETH: GPIO0 IOMUX after ETH.begin  MCU_SEL=%d  GPIO17=%d\n",
+  // Step 5: ETH.begin() calls perimanClearPinBus(GPIO0) which resets IOMUX.
+  // Re-apply immediately AND keep polling until the EMAC DMA list is non-zero,
+  // which confirms the EMAC driver has started and is using the clock.
+  for (int i = 0; i < 200; i++) {  // up to 2 seconds
+    gpio0_as_rmii_clk();
+    if (REG_READ(0x3FF69010) != 0) break;
+    delay(10);
+  }
+  Serial.printf("ETH: GPIO0 IOMUX after ETH.begin  MCU_SEL=%d  GPIO17=%d  TX_LIST=0x%08x\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
-                (int)digitalRead(PHY_RST_PIN));
+                (int)digitalRead(PHY_RST_PIN),
+                REG_READ(0x3FF69010));
 }
 
 void loop() {
