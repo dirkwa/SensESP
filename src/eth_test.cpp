@@ -120,6 +120,14 @@ void setup() {
             -1, ETH_CLK_MODE);
   Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
                 REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
+  // DPORT_WIFI_CLK_EN bit14=EMAC, EMAC_EX PHYINF bit5=RMII
+  // EMAC_DMA_BUS_MODE=0x3FF69000, EMAC_DMA_OP_MODE=0x3FF69018
+  Serial.printf("ETH: DPORT CLK_EN=0x%08x after begin\n",
+                DPORT_REG_READ(0x3FF000F4));
+  Serial.printf("ETH: EMAC_EX PHYINF=0x%08x  CLK_CTRL=0x%08x after begin\n",
+                REG_READ(0x3FF69800), REG_READ(0x3FF69804));
+  Serial.printf("ETH: DMA BUS_MODE=0x%08x  OP_MODE=0x%08x  STATUS=0x%08x\n",
+                REG_READ(0x3FF69000), REG_READ(0x3FF69018), REG_READ(0x3FF69014));
 
   // Step 6: walk the TX descriptor ring and fix any DES3 (next descriptor
   // pointer) that points outside the descriptor ring (into heap/lwIP buffers).
