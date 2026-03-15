@@ -105,6 +105,9 @@ static void IRAM_ATTR gpio0_as_rmii_clk() {
 static hw_timer_t* iomux_timer = NULL;
 static void IRAM_ATTR iomux_timer_isr() {
   gpio0_as_rmii_clk();
+  // Also ensure EMAC_EX ex_clk_ctrl has ext_en=1, int_en=0 (external clock mode)
+  REG_SET_BIT(0x3FF69808, BIT(0));    // ext_en = 1
+  REG_CLR_BIT(0x3FF69808, BIT(1));    // int_en = 0
 }
 
 void setup() {
@@ -142,13 +145,10 @@ void setup() {
                 esp_get_free_heap_size(),
                 heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
 
-  // Check EMAC peripheral clock and reset state before ETH.begin()
-  // DPORT_WIFI_CLK_EN_REG=0x3FF000F4, DPORT_CORE_RST_EN_REG=0x3FF000E0
-  // EMAC_EXT base=0x3FF69800: +0=PHYINF_CONF, +4=CLK_CTRL
-  Serial.printf("ETH: DPORT CLK_EN=0x%08x  RST_EN=0x%08x\n",
-                DPORT_REG_READ(0x3FF000F4), DPORT_REG_READ(0x3FF000E0));
-  Serial.printf("ETH: EMAC_EX PHYINF=0x%08x  CLK_CTRL=0x%08x\n",
-                REG_READ(0x3FF69800), REG_READ(0x3FF69804));
+  // EMAC_EXT base=0x3FF69800: +0x00=ex_clkout_conf, +0x04=ex_oscclk_conf,
+  //   +0x08=ex_clk_ctrl (bit0=ext_en, bit1=int_en), +0x0C=ex_phyinf_conf
+  Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (before begin)\n",
+                REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
 
 #if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
   // Start hardware timer ISR to re-apply GPIO0 IOMUX every 100µs during ETH.begin().
@@ -174,10 +174,8 @@ void setup() {
                 REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
   // DPORT_WIFI_CLK_EN bit14=EMAC, EMAC_EX PHYINF bit5=RMII
   // EMAC_DMA_BUS_MODE=0x3FF69000, EMAC_DMA_OP_MODE=0x3FF69018
-  Serial.printf("ETH: DPORT CLK_EN=0x%08x after begin\n",
-                DPORT_REG_READ(0x3FF000F4));
-  Serial.printf("ETH: EMAC_EX PHYINF=0x%08x  CLK_CTRL=0x%08x after begin\n",
-                REG_READ(0x3FF69800), REG_READ(0x3FF69804));
+  Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (after begin)\n",
+                REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
   Serial.printf("ETH: DMA BUS_MODE=0x%08x  OP_MODE=0x%08x  STATUS=0x%08x\n",
                 REG_READ(0x3FF69000), REG_READ(0x3FF69018), REG_READ(0x3FF69014));
 
