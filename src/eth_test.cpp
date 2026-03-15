@@ -17,6 +17,7 @@
 #include <WiFi.h>
 #include "esp_private/esp_gpio_reserve.h"
 #include "soc/io_mux_reg.h"
+#include "soc/gpio_reg.h"
 
 #define PHY_RST_PIN 17
 
@@ -104,5 +105,19 @@ void loop() {
                   (int)ETH.hasIP(),
                   ETH.localIP().toString().c_str(),
                   ETH.macAddress().c_str());
+
+    uint32_t dma_status  = REG_READ(0x3FF69014);
+    uint32_t dma_tx_list = REG_READ(0x3FF69010);
+    uint32_t dma_tx_curr = REG_READ(0x3FF69050);
+    Serial.printf("  DMA TX_STATE=%d  TX_LIST=0x%08x  TX_CURR=0x%08x\n",
+                  (int)((dma_status >> 20) & 0x7),
+                  dma_tx_list, dma_tx_curr);
+    if (dma_tx_curr >= 0x3FF00000 && dma_tx_curr <= 0x3FFFFFFF) {
+      uint32_t d0 = *((volatile uint32_t*)(dma_tx_curr + 0));
+      uint32_t d2 = *((volatile uint32_t*)(dma_tx_curr + 8));
+      uint32_t d3 = *((volatile uint32_t*)(dma_tx_curr + 12));
+      Serial.printf("  TX_CURR desc: DES0=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
+                    d0, d2, d3, (int)(d0 >> 31));
+    }
   }
 }
