@@ -22,6 +22,7 @@
 #include "esp_system.h"
 #include "rom/rtc.h"
 #include "soc/dport_access.h"
+#include "esp32-hal-timer.h"
 
 #define PHY_RST_PIN 17  // only used when ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
 
@@ -89,12 +90,21 @@ void onEvent(arduino_event_id_t event) {
   }
 }
 
-static void gpio0_as_rmii_clk() {
+static void IRAM_ATTR gpio0_as_rmii_clk() {
   esp_gpio_revoke(BIT64(GPIO_NUM_0));
   REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
   PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
+}
+
+// Hardware timer ISR: continuously re-applies GPIO0 RMII IOMUX during ETH.begin().
+// perimanClearPinBus(0) inside ETH.begin() resets GPIO0 to GPIO mode, which kills
+// the RMII clock. The EMAC DMA reset then times out because it needs the clock.
+// This ISR fires every 100µs and hammers the IOMUX back until DMA is up.
+static hw_timer_t* iomux_timer = NULL;
+static void IRAM_ATTR iomux_timer_isr() {
+  gpio0_as_rmii_clk();
 }
 
 void setup() {
@@ -140,9 +150,26 @@ void setup() {
   Serial.printf("ETH: EMAC_EX PHYINF=0x%08x  CLK_CTRL=0x%08x\n",
                 REG_READ(0x3FF69800), REG_READ(0x3FF69804));
 
+#if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
+  // Start hardware timer ISR to re-apply GPIO0 IOMUX every 100µs during ETH.begin().
+  // ETH.begin() calls perimanClearPinBus(0) which resets GPIO0 IOMUX to GPIO mode,
+  // killing the RMII clock. The EMAC DMA reset then times out. The ISR fights it back.
+  iomux_timer = timerBegin(1000000);  // 1MHz timer
+  timerAttachInterrupt(iomux_timer, &iomux_timer_isr);
+  timerAlarm(iomux_timer, 100, true, 0);  // fire every 100µs
+  Serial.println("ETH: iomux_timer started (100µs ISR)");
+#endif
+
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
+
+#if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
+  timerEnd(iomux_timer);
+  iomux_timer = NULL;
+  Serial.println("ETH: iomux_timer stopped");
+#endif
+
   Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
                 REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
   // DPORT_WIFI_CLK_EN bit14=EMAC, EMAC_EX PHYINF bit5=RMII
