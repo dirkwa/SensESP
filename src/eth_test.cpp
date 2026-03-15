@@ -136,13 +136,27 @@ void setup() {
 }
 
 void loop() {
-  // Kick TX DMA every 100ms — if suspended (TX_STATE=6) and there's a pending
-  // packet (OWN=1 somewhere), poll demand wakes it up.
-  static unsigned long last_kick = 0;
-  if (millis() - last_kick > 100) {
-    last_kick = millis();
-    uint32_t st = (REG_READ(0x3FF69014) >> 20) & 0x7;
-    if (st == 6) REG_WRITE(0x3FF69004, 1);
+  // Watchdog: if TX_CURR lands on the corrupt lwIP buffer descriptor
+  // (DES0=0xffffffff), the EMAC is stuck. Restart it.
+  static unsigned long last_restart = 0;
+  uint32_t tx_curr = REG_READ(0x3FF69050);
+  if (tx_curr >= 0x3FF00000 && tx_curr <= 0x3FFFFFFF) {
+    uint32_t des0 = *((volatile uint32_t*)tx_curr);
+    if (des0 == 0xffffffff && millis() - last_restart > 3000) {
+      last_restart = millis();
+      Serial.println("ETH: TX stuck on corrupt desc — restarting EMAC");
+      ETH.end();
+      delay(200);
+      gpio0_as_rmii_clk();
+      ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
+                -1, ETH_CLK_MODE);
+      for (int i = 0; i < 500; i++) {
+        gpio0_as_rmii_clk();
+        if (REG_READ(0x3FF69010) != 0) break;
+        vTaskDelay(pdMS_TO_TICKS(2));
+      }
+      Serial.printf("ETH: restarted TX_LIST=0x%08x\n", REG_READ(0x3FF69010));
+    }
   }
 
   static unsigned long last = 0;
