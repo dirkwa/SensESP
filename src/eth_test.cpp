@@ -47,18 +47,21 @@ void onEvent(arduino_event_id_t event) {
       Serial.printf("ETH: GPIO23(MDC)  IOMUX=0x%08x MCU_SEL=%d\n",
                     REG_READ(IO_MUX_GPIO23_REG),
                     (int)REG_GET_FIELD(IO_MUX_GPIO23_REG, MCU_SEL));
-      // Raw MDIO read of PHY addr=1, reg=2 (PHY ID1) using EMAC MAC registers.
-      // EMAC_MAC_MII_ADDR_REG=0x3FF6C010: [15:11]=PHY_addr [10:6]=MII_reg [1]=busy [0]=write
-      // EMAC_MAC_MII_DATA_REG=0x3FF6C014
-      // MDIO clock divider: bits[4:2] = CR — use 010 = div42 for 80MHz APB -> ~2MHz MDIO
-      REG_WRITE(0x3FF6C010, (1 << 11) | (2 << 6) | (2 << 2) | (1 << 1)); // addr=1,reg=2,CR=2,busy
+      // Raw MDIO read of PHY addr=1, regs 2+3 (PHY ID1+ID2) via EMAC MAC registers.
+      // MAC block is at DMA_BASE+0x1000 = 0x3FF6A000
+      // emacgmiiaddr = +0x10 = 0x3FF6A010: [15:11]=PHY_addr [10:6]=MII_reg [4:2]=CR [1]=busy [0]=write
+      // emacmiidata  = +0x14 = 0x3FF6A014
+      // CR=010 → div42 for 80MHz APB → ~1.9MHz MDIO clock
+      #define EMAC_GMIIADDR 0x3FF6A010
+      #define EMAC_GMIIDATA 0x3FF6A014
+      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(2<<6)|(2<<2)|(1<<1)); // PHY=1,reg=2,CR=2,start
       uint32_t t = millis();
-      while ((REG_READ(0x3FF6C010) & 0x2) && (millis() - t < 10)) {}
-      uint32_t phy_id1 = REG_READ(0x3FF6C014);
-      REG_WRITE(0x3FF6C010, (1 << 11) | (3 << 6) | (2 << 2) | (1 << 1)); // addr=1,reg=3,CR=2,busy
+      while ((REG_READ(EMAC_GMIIADDR) & 0x2) && (millis()-t < 10)) {}
+      uint32_t phy_id1 = REG_READ(EMAC_GMIIDATA);
+      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(3<<6)|(2<<2)|(1<<1)); // PHY=1,reg=3,CR=2,start
       t = millis();
-      while ((REG_READ(0x3FF6C010) & 0x2) && (millis() - t < 10)) {}
-      uint32_t phy_id2 = REG_READ(0x3FF6C014);
+      while ((REG_READ(EMAC_GMIIADDR) & 0x2) && (millis()-t < 10)) {}
+      uint32_t phy_id2 = REG_READ(EMAC_GMIIDATA);
       Serial.printf("ETH: MDIO PHY ID1=0x%04x  ID2=0x%04x (expect 0x0007 0xC0F0 for LAN8720)\n",
                     phy_id1 & 0xFFFF, phy_id2 & 0xFFFF);
       ETH.setHostname("eth-test");
