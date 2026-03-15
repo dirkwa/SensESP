@@ -19,6 +19,8 @@
 #include "soc/gpio_reg.h"
 #include "lwip/netif.h"
 #include "lwip/dhcp.h"
+#include "esp_system.h"
+#include "rom/rtc.h"
 
 #define PHY_RST_PIN 17  // only used when ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
 
@@ -63,7 +65,8 @@ static void gpio0_as_rmii_clk() {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("\nAptinex IsolPoE ETH test starting...");
+  esp_reset_reason_t reset_reason = esp_reset_reason();
+  Serial.printf("\nAptinex IsolPoE ETH test starting... reset_reason=%d\n", (int)reset_reason);
 
 #if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
   // External oscillator mode: GPIO17 = oscillator enable + PHY nRST.
@@ -96,10 +99,12 @@ void setup() {
 
 #if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
   // Re-apply IOMUX immediately after ETH.begin() and wait for DMA to init.
-  for (int i = 0; i < 500; i++) {
+  for (int i = 0; i < 3000; i++) {
     gpio0_as_rmii_clk();
     if (REG_READ(0x3FF69010) != 0) break;
     vTaskDelay(pdMS_TO_TICKS(2));
+    if (i % 500 == 499)
+      Serial.printf("ETH: waiting for EMAC DMA init... %ds\n", (i + 1) * 2 / 1000);
   }
 #endif
   Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
@@ -139,8 +144,8 @@ void setup() {
 void loop() {
   // Watchdog: hard-reset via esp_restart() rather than ETH.end()/ETH.begin()
   // to avoid leaking the EMAC interrupt on repeated restarts.
-  if (millis() > 12000 && !ETH.linkUp()) {
-    Serial.println("ETH: no link after 12s — hard reset");
+  if (millis() > 20000 && !ETH.linkUp()) {
+    Serial.println("ETH: no link after 20s — hard reset");
     delay(100);
     esp_restart();
   }
