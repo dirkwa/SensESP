@@ -6,7 +6,8 @@
 //
 // ETH_CLOCK_GPIO0_IN (0): external 50MHz oscillator → GPIO0 RMII input.
 //   GPIO17 = oscillator enable + PHY nRST.
-//   Requires IOMUX workaround (perimanClearPinBus resets GPIO0 during init).
+//   lib/Ethernet/ETH.cpp has a patch that re-applies GPIO0 IOMUX after
+//   perimanClearPinBus() resets it, so the clock is present during DMA init.
 //
 // ETH_CLOCK_GPIO17_OUT (3): ESP32 generates 50MHz on GPIO17.
 //   GPIO17 is the clock output — no external oscillator, no PHY reset pin.
@@ -22,7 +23,6 @@
 #include "esp_system.h"
 #include "rom/rtc.h"
 #include "soc/dport_access.h"
-#include "esp32-hal-timer.h"
 
 #define PHY_RST_PIN 17  // only used when ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
 
@@ -31,15 +31,16 @@ static bool eth_connected = false;
 void onEvent(arduino_event_id_t event) {
   switch (event) {
     case ARDUINO_EVENT_ETH_START: {
-      // perimanClearPinBus() inside ETH.begin() resets GPIO0 IOMUX before
-      // this event fires. Re-apply it here so the clock is present when
-      // emac_esp32_start() allocates DMA descriptors and starts the engine.
+      // The real IOMUX fix is in lib/Ethernet/ETH.cpp: it re-applies GPIO0
+      // IOMUX immediately after perimanClearPinBus(), before DMA init runs.
+      // This event fires after esp_eth_start() returns (DMA already running),
+      // so this re-apply is just a safety belt.
       esp_gpio_revoke(BIT64(GPIO_NUM_0));
       REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
       PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-      Serial.printf("ETH: Started (IOMUX re-applied, MCU_SEL=%d)\n",
+      Serial.printf("ETH: Started (IOMUX confirmed, MCU_SEL=%d)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
       // Check GPIO18 (MDIO) and GPIO23 (MDC) IOMUX state: MCU_SEL=2 = GPIO matrix
       Serial.printf("ETH: GPIO18(MDIO) IOMUX=0x%08x MCU_SEL=%d\n",
@@ -90,26 +91,6 @@ void onEvent(arduino_event_id_t event) {
   }
 }
 
-static void IRAM_ATTR gpio0_as_rmii_clk() {
-  esp_gpio_revoke(BIT64(GPIO_NUM_0));
-  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
-  PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
-  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
-  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-}
-
-// Hardware timer ISR: continuously re-applies GPIO0 RMII IOMUX during ETH.begin().
-// perimanClearPinBus(0) inside ETH.begin() resets GPIO0 to GPIO mode, which kills
-// the RMII clock. The EMAC DMA reset then times out because it needs the clock.
-// This ISR fires every 100µs and hammers the IOMUX back until DMA is up.
-static hw_timer_t* iomux_timer = NULL;
-static void IRAM_ATTR iomux_timer_isr() {
-  gpio0_as_rmii_clk();
-  // Also ensure EMAC_EX ex_clk_ctrl has ext_en=1, int_en=0 (external clock mode)
-  REG_SET_BIT(0x3FF69808, BIT(0));    // ext_en = 1
-  REG_CLR_BIT(0x3FF69808, BIT(1));    // int_en = 0
-}
-
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -124,7 +105,13 @@ void setup() {
   delay(100);
   Serial.println("ETH: oscillator on");
 
-  gpio0_as_rmii_clk();
+  // Pre-apply GPIO0 IOMUX so the clock is present from the start.
+  // lib/Ethernet/ETH.cpp re-applies it after perimanClearPinBus() resets it.
+  esp_gpio_revoke(BIT64(GPIO_NUM_0));
+  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
+  PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
   Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
 
@@ -150,25 +137,9 @@ void setup() {
   Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (before begin)\n",
                 REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
 
-#if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
-  // Start hardware timer ISR to re-apply GPIO0 IOMUX every 100µs during ETH.begin().
-  // ETH.begin() calls perimanClearPinBus(0) which resets GPIO0 IOMUX to GPIO mode,
-  // killing the RMII clock. The EMAC DMA reset then times out. The ISR fights it back.
-  iomux_timer = timerBegin(1000000);  // 1MHz timer
-  timerAttachInterrupt(iomux_timer, &iomux_timer_isr);
-  timerAlarm(iomux_timer, 100, true, 0);  // fire every 100µs
-  Serial.println("ETH: iomux_timer started (100µs ISR)");
-#endif
-
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
-
-#if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
-  timerEnd(iomux_timer);
-  iomux_timer = NULL;
-  Serial.println("ETH: iomux_timer stopped");
-#endif
 
   Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
                 REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
