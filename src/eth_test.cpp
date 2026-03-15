@@ -171,6 +171,36 @@ void loop() {
       Serial.printf("  TX_CURR desc: DES0=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
                     d0, d2, d3, (int)(d0 >> 31));
     }
+    // Dump all TX descriptors once (only on first poll)
+    static bool tx_ring_dumped = false;
+    if (!tx_ring_dumped && dma_tx_list >= 0x3FF00000 && dma_tx_list <= 0x3FFFFFFF) {
+      tx_ring_dumped = true;
+      Serial.println("  TX descriptor ring dump:");
+      uint32_t desc = dma_tx_list;
+      for (int i = 0; i < 32; i++) {
+        if (desc < 0x3FF00000 || desc > 0x3FFFFFFF) break;
+        volatile uint32_t* d = (volatile uint32_t*)desc;
+        Serial.printf("    TX[%2d] @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x\n",
+                      i, desc, d[0], d[1], d[2], d[3]);
+        if (d[3] == dma_tx_list) { Serial.println("    (ring end)"); break; }
+        desc = d[3];
+      }
+    }
+    // Dump all RX descriptors once (only on first poll)
+    static bool rx_ring_dumped = false;
+    if (!rx_ring_dumped && dma_rx_list >= 0x3FF00000 && dma_rx_list <= 0x3FFFFFFF) {
+      rx_ring_dumped = true;
+      Serial.println("  RX descriptor ring dump:");
+      uint32_t desc = dma_rx_list;
+      for (int i = 0; i < 32; i++) {
+        if (desc < 0x3FF00000 || desc > 0x3FFFFFFF) break;
+        volatile uint32_t* d = (volatile uint32_t*)desc;
+        Serial.printf("    RX[%2d] @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x\n",
+                      i, desc, d[0], d[1], d[2], d[3]);
+        if (d[3] == dma_rx_list) { Serial.println("    (ring end)"); break; }
+        desc = d[3];
+      }
+    }
     // Dump lwIP netif list + DHCP state
     for (struct netif* nif = netif_list; nif != NULL; nif = nif->next) {
       Serial.printf("  netif %c%c%d  flags=0x%02x  ip=%s\n",
