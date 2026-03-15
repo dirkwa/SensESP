@@ -1,17 +1,16 @@
 // Minimal Aptinex IsolPoE Ethernet test — no SensESP framework.
 //
 // GPIO17 = LAN8720 nRST / oscillator enable (4.7k pulldown → LOW by default).
-//   LOW  → PHY in reset, oscillator off
-//   HIGH → PHY running, oscillator on
 //
-// The LAN8720 requires REFCLK (50MHz) to be present DURING its reset sequence
-// for RMII to initialise correctly. Sequence:
-//   1. Enable oscillator (GPIO17 HIGH) and let it stabilise.
-//   2. Pre-configure GPIO0 IOMUX as EMAC RMII clock input so the clock is
-//      present before ETH.begin() starts the EMAC.
-//   3. Pulse nRST (GPIO17 LOW→HIGH briefly) with clock running.
-//   4. Call ETH.begin() with power=-1 so IDF does not touch GPIO17 again.
-//   5. Re-apply GPIO0 IOMUX after ETH.begin() in case it was reset.
+// Two clock modes are supported, selected by ETH_CLK_MODE build flag:
+//
+// ETH_CLOCK_GPIO0_IN (0): external 50MHz oscillator → GPIO0 RMII input.
+//   GPIO17 = oscillator enable + PHY nRST.
+//   Requires IOMUX workaround (perimanClearPinBus resets GPIO0 during init).
+//
+// ETH_CLOCK_GPIO17_OUT (3): ESP32 generates 50MHz on GPIO17.
+//   GPIO17 is the clock output — no external oscillator, no PHY reset pin.
+//   IDF passes power=-1; PHY self-resets on power-up.
 
 #include <ETH.h>
 #include <WiFi.h>
@@ -21,7 +20,7 @@
 #include "lwip/netif.h"
 #include "lwip/dhcp.h"
 
-#define PHY_RST_PIN 17
+#define PHY_RST_PIN 17  // only used when ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
 
 static bool eth_connected = false;
 
@@ -66,46 +65,44 @@ void setup() {
   delay(200);
   Serial.println("\nAptinex IsolPoE ETH test starting...");
 
-  // Step 1: enable oscillator and let it stabilise.
-  // On cold boot GPIO0 is briefly LOW (strapping pin); wait for it to settle
-  // before enabling the oscillator so the LAN8720 sees a clean 50MHz signal.
-  delay(200);
+#if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
+  // External oscillator mode: GPIO17 = oscillator enable + PHY nRST.
+  delay(200);  // let GPIO0 strapping pin settle after cold boot
   pinMode(PHY_RST_PIN, OUTPUT);
   digitalWrite(PHY_RST_PIN, HIGH);
-  delay(100);  // longer stabilisation for cold boot
+  delay(100);
   Serial.println("ETH: oscillator on");
 
-  // Step 2: configure GPIO0 as RMII clock input while oscillator is running.
   gpio0_as_rmii_clk();
   Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
 
-  // Step 3: pulse PHY reset with clock present.
   digitalWrite(PHY_RST_PIN, LOW);
   delay(10);
   digitalWrite(PHY_RST_PIN, HIGH);
   delay(50);
   Serial.println("ETH: PHY reset done");
+#else
+  // Internal clock mode: IDF drives GPIO17 as clock output.
+  // No oscillator enable needed; PHY self-resets on power-up.
+  Serial.println("ETH: using internal clock on GPIO17");
+#endif
 
-  // Step 4: start Ethernet — power=-1 so IDF leaves GPIO17 alone.
-  // ETH.begin() internally calls perimanClearPinBus(GPIO0) which resets the
-  // IOMUX. We pre-configure it above and re-apply it immediately after.
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
             -1, ETH_CLK_MODE);
 
+#if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
   // Re-apply IOMUX immediately after ETH.begin() and wait for DMA to init.
   for (int i = 0; i < 500; i++) {
     gpio0_as_rmii_clk();
     if (REG_READ(0x3FF69010) != 0) break;
     vTaskDelay(pdMS_TO_TICKS(2));
   }
-  Serial.printf("ETH: GPIO0 IOMUX after ETH.begin  MCU_SEL=%d  GPIO17=%d  TX_LIST=0x%08x\n",
-                (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
-                (int)digitalRead(PHY_RST_PIN),
-                REG_READ(0x3FF69010));
+#endif
+  Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x\n", REG_READ(0x3FF69010));
 
   // Step 6: walk the TX descriptor ring and fix any DES3 (next descriptor
   // pointer) that points outside the descriptor ring (into heap/lwIP buffers).
