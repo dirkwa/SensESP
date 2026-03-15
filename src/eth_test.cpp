@@ -67,9 +67,12 @@ void setup() {
   Serial.println("\nAptinex IsolPoE ETH test starting...");
 
   // Step 1: enable oscillator and let it stabilise.
+  // On cold boot GPIO0 is briefly LOW (strapping pin); wait for it to settle
+  // before enabling the oscillator so the LAN8720 sees a clean 50MHz signal.
+  delay(200);
   pinMode(PHY_RST_PIN, OUTPUT);
   digitalWrite(PHY_RST_PIN, HIGH);
-  delay(50);
+  delay(100);  // longer stabilisation for cold boot
   Serial.println("ETH: oscillator on");
 
   // Step 2: configure GPIO0 as RMII clock input while oscillator is running.
@@ -136,9 +139,27 @@ void setup() {
 }
 
 void loop() {
-  // Watchdog: if TX_CURR lands on the corrupt lwIP buffer descriptor
-  // (DES0=0xffffffff), the EMAC is stuck. Restart it.
   static unsigned long last_restart = 0;
+
+  // Watchdog 1: EMAC failed to init (TX_LIST=0 for >10s) — restart
+  if (REG_READ(0x3FF69010) == 0 && millis() > 10000 && millis() - last_restart > 10000) {
+    last_restart = millis();
+    Serial.println("ETH: EMAC not initialized — restarting");
+    ETH.end();
+    delay(500);
+    gpio0_as_rmii_clk();
+    ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
+              -1, ETH_CLK_MODE);
+    for (int i = 0; i < 500; i++) {
+      gpio0_as_rmii_clk();
+      if (REG_READ(0x3FF69010) != 0) break;
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    Serial.printf("ETH: restarted TX_LIST=0x%08x\n", REG_READ(0x3FF69010));
+    return;
+  }
+
+  // Watchdog 2: TX_CURR on corrupt descriptor — restart EMAC
   uint32_t tx_curr = REG_READ(0x3FF69050);
   if (tx_curr >= 0x3FF00000 && tx_curr <= 0x3FFFFFFF) {
     uint32_t des0 = *((volatile uint32_t*)tx_curr);
