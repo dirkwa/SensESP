@@ -159,6 +159,10 @@ void loop() {
       Serial.printf("  TX_CURR desc: DES0=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
                     d0, d2, d3, (int)(d0 >> 31));
     }
+    // Kick TX DMA — if suspended (TX_STATE=6), issue poll demand to wake it.
+    if (((dma_status >> 20) & 0x7) == 6) {
+      REG_WRITE(0x3FF69004, 1);
+    }
     // Dump lwIP netif list + DHCP state
     for (struct netif* nif = netif_list; nif != NULL; nif = nif->next) {
       Serial.printf("  netif %c%c%d  flags=0x%02x  ip=%s\n",
