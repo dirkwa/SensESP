@@ -102,7 +102,8 @@ void setup() {
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 #endif
-  Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x\n", REG_READ(0x3FF69010));
+  Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
+                REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
 
   // Step 6: walk the TX descriptor ring and fix any DES3 (next descriptor
   // pointer) that points outside the descriptor ring (into heap/lwIP buffers).
@@ -157,9 +158,12 @@ void loop() {
     uint32_t dma_status  = REG_READ(0x3FF69014);
     uint32_t dma_tx_list = REG_READ(0x3FF69010);
     uint32_t dma_tx_curr = REG_READ(0x3FF69050);
+    uint32_t dma_rx_list = REG_READ(0x3FF6900C);
+    uint32_t dma_rx_curr = REG_READ(0x3FF69054);
     Serial.printf("  DMA TX_STATE=%d  TX_LIST=0x%08x  TX_CURR=0x%08x\n",
                   (int)((dma_status >> 20) & 0x7),
                   dma_tx_list, dma_tx_curr);
+    Serial.printf("  RX_LIST=0x%08x  RX_CURR=0x%08x\n", dma_rx_list, dma_rx_curr);
     if (dma_tx_curr >= 0x3FF00000 && dma_tx_curr <= 0x3FFFFFFF) {
       uint32_t d0 = *((volatile uint32_t*)(dma_tx_curr + 0));
       uint32_t d2 = *((volatile uint32_t*)(dma_tx_curr + 8));
