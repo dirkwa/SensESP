@@ -246,10 +246,10 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
   // external 50MHz RMII clock input before the EMAC DMA software reset loop.
   // Re-apply the RMII clock IOMUX directly so the clock is present when
   // emac_esp32_init() polls for the DMA sw_rst bit to clear.
-  // FUNC_GPIO0_CLK_OUT1=1 is the IOMUX function for EMAC external clock input.
-  // FUN_IE (bit 9) enables the input buffer.
+  // FUNC_GPIO0_EMAC_TX_CLK=5 is the correct IOMUX function for RMII REF_CLK input
+  // (despite the confusing name — confirmed from IDF emac_hal_iomux_rmii_clk_input source).
   if (clock_mode == ETH_CLOCK_GPIO0_IN) {
-    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_EMAC_TX_CLK);
     PIN_INPUT_ENABLE(PERIPHS_IO_MUX_GPIO0_U);
     CLEAR_PERI_REG_MASK(PERIPHS_IO_MUX_GPIO0_U, FUN_PD);
     CLEAR_PERI_REG_MASK(PERIPHS_IO_MUX_GPIO0_U, FUN_PU);

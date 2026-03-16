@@ -36,11 +36,11 @@ void onEvent(arduino_event_id_t event) {
       // This event fires after esp_eth_start() returns (DMA already running),
       // so this re-apply is just a safety belt.
       esp_gpio_revoke(BIT64(GPIO_NUM_0));
-      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_CLK_OUT1);
+      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
       PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-      Serial.printf("ETH: Started (IOMUX confirmed, MCU_SEL=%d)\n",
+      Serial.printf("ETH: Started (IOMUX confirmed, MCU_SEL=%d need 5)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
       // Check GPIO18 (MDIO) and GPIO23 (MDC) IOMUX state: MCU_SEL=2 = GPIO matrix
       // RMII TX pins must be MCU_SEL=5 (EMAC IOMUX), not 2 (GPIO matrix)
@@ -158,11 +158,13 @@ void setup() {
   // Pre-apply GPIO0 IOMUX so the clock is present from the start.
   // lib/Ethernet/ETH.cpp re-applies it after perimanClearPinBus() resets it.
   esp_gpio_revoke(BIT64(GPIO_NUM_0));
-  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_CLK_OUT1);
+  // FUNC_GPIO0_EMAC_TX_CLK=5 is the correct IOMUX function for RMII REF_CLK input.
+  // (Despite the confusing name, this is the input path — confirmed from IDF source.)
+  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
   PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-  Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d\n",
+  Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d (need 5)\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
 
   digitalWrite(PHY_RST_PIN, LOW);
@@ -324,8 +326,8 @@ void loop() {
       uint32_t osc = REG_READ(0x3FF69804);
       REG_WRITE(0x3FF69804, osc | (1 << 24));
       Serial.printf("  CLK_FIX3: ex_oscclk_conf -> 0x%08x\n", REG_READ(0x3FF69804));
-      // Re-apply GPIO0 IOMUX as clock input (paranoia check).
-      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_CLK_OUT1);
+      // Re-apply GPIO0 IOMUX as RMII REF_CLK input (FUNC_GPIO0_EMAC_TX_CLK=5).
+      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
       PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
