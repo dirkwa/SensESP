@@ -195,6 +195,18 @@ void setup() {
 
   Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
                 REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
+  // EMAC_EX clk_ctrl (+0x08): bit0=ext_en, bit1=int_en, bit3=mii_clk_tx_en, bit4=mii_clk_rx_en
+  // IDF emac_ll_clock_enable_rmii_input() only sets ext_en (bit0), not mii_clk_tx/rx_en.
+  // IDF v4.4 appears to have had mii_clk_tx_en+mii_clk_rx_en set (reset value?).
+  // Force them on here — without them the REF_CLK may not reach the RMII TX/RX paths.
+#if CONFIG_IDF_TARGET_ESP32
+  {
+    uint32_t clk_ctrl = REG_READ(0x3FF69808);
+    REG_WRITE(0x3FF69808, clk_ctrl | (1<<3) | (1<<4));
+    Serial.printf("ETH: clk_ctrl 0x%08x -> 0x%08x (set mii_clk_tx_en+mii_clk_rx_en)\n",
+                  clk_ctrl, REG_READ(0x3FF69808));
+  }
+#endif
   // DPORT_WIFI_CLK_EN bit14=EMAC, EMAC_EX PHYINF bit5=RMII
   // EMAC_DMA_BUS_MODE=0x3FF69000, EMAC_DMA_OP_MODE=0x3FF69018
   Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (after begin)\n",
