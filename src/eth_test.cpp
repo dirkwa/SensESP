@@ -48,9 +48,11 @@ void onEvent(arduino_event_id_t event) {
       // emaccstatus reads 0x00 (speed=0) meaning the MAC clock domain never activated.
       // The named bits suggest MII-only but they may gate RMII paths too — enable all.
       REG_WRITE(0x3FF69808, 0x3F);
-      // ex_oscclk_conf.clk_sel (bit20 of 0x3FF69804) must be 1 to route the
+      // ex_oscclk_conf.clk_sel (bit24 of 0x3FF69804) must be 1 to route the
       // external GPIO0 clock through the RMII clock mux.
-      REG_SET_BIT(0x3FF69804, BIT(20));
+      // bit24: after 4×6-bit div fields (div_num_10m, h_div_num_10m,
+      //        div_num_100m, h_div_num_100m) = 24 bits total.
+      REG_SET_BIT(0x3FF69804, BIT(24));
       Serial.printf("ETH: Started (IOMUX MCU_SEL=%d need 5, clk_ctrl=0x%08x oscclk=0x%08x)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
                     REG_READ(0x3FF69808), REG_READ(0x3FF69804));
@@ -282,11 +284,11 @@ void loop() {
     uint32_t mac_intr  = REG_READ(0x3FF6A038);  // MAC interrupt status
     // EMAC_EX: clkout_conf=+0, oscclk_conf=+4, clk_ctrl=+8, phyinf=+C
     // clk_ctrl bits: ext_en(0) int_en(1) rx_125_clk_en(2) mii_clk_tx_en(3) mii_clk_rx_en(4) clk_en(5)
-    // phyinf bits[15:13]=phy_intf_sel (need 4=RMII), oscclk bit20=clk_sel (need 1 for ext clock)
+    // phyinf bits[15:13]=phy_intf_sel (need 4=RMII), oscclk bit24=clk_sel (need 1 for ext clock)
     uint32_t phyinf_val = REG_READ(0x3FF6980C);
     uint32_t oscclk_val = REG_READ(0x3FF69804);
     Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x (clk_sel=%d)  clk_ctrl=0x%08x  phyinf=0x%08x (intf=%d need 4)\n",
-                  REG_READ(0x3FF69800), oscclk_val, (int)((oscclk_val>>20)&1),
+                  REG_READ(0x3FF69800), oscclk_val, (int)((oscclk_val>>24)&1),
                   REG_READ(0x3FF69808), phyinf_val, (int)((phyinf_val>>13)&7));
     // MMC control at 0x3FF6A100: bit0=reset, bit1=stop_rollover, bit2=reset_on_read, bit3=freeze
     // Standard GMAC MMC TX counter layout (base 0x3FF6A100):

@@ -257,8 +257,9 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
     // selected before the EMAC bus clock is enabled and the DMA reset runs.
     // emac_ll_clock_enable_rmii_input() sets this bit, but it is observed to
     // read back as 0 after init, causing the MAC TX FIFO to not drain.
-    // EMAC_EX base=0x3FF69800; ex_oscclk_conf=+0x04, clk_sel=bit20.
-    REG_SET_BIT(0x3FF69804, BIT(20));
+    // EMAC_EX base=0x3FF69800; ex_oscclk_conf=+0x04.
+    // clk_sel is at bit24 (after 4×6-bit div fields = 24 bits).
+    REG_SET_BIT(0x3FF69804, BIT(24));
   }
 #endif /* CONFIG_IDF_TARGET_ESP32 */
   if (!perimanClearPinBus(_pin_mcd)) {
@@ -399,14 +400,15 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
   _eth_connected_event_handle = Network.onSysEvent(onEthConnected, ARDUINO_EVENT_ETH_CONNECTED);
 
 #if CONFIG_IDF_TARGET_ESP32
-  // emaccstatus reports speed=0 (MAC clock domain dead) when only ext_en (bit0)
-  // is set. Set ALL 6 bits of ex_clk_ctrl (bits 0-5) to ensure the external
+  // emaccstatus reports speed=0 (MAC clock domain dead) when clk_sel is wrong.
+  // Set ALL 6 bits of ex_clk_ctrl (bits 0-5) to ensure the external
   // RMII REF_CLK reaches the MAC TX/RX clock domains.
-  // Also force ex_oscclk_conf.clk_sel=1 (bit20 of 0x3FF69804) to select the
-  // external clock path. Both applied before esp_eth_start().
+  // Force ex_oscclk_conf.clk_sel=1 (bit24 of 0x3FF69804 — after 4×6-bit
+  // div fields totaling 24 bits) to select the external clock path.
+  // Both applied before esp_eth_start().
   REG_WRITE(0x3FF69808, 0x3F);
   if (clock_mode == ETH_CLOCK_GPIO0_IN) {
-    REG_SET_BIT(0x3FF69804, BIT(20));
+    REG_SET_BIT(0x3FF69804, BIT(24));
   }
 #endif
 
