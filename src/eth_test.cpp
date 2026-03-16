@@ -56,6 +56,9 @@ void onEvent(arduino_event_id_t event) {
       Serial.printf("ETH: GPIO25(RXD0) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
                     REG_READ(IO_MUX_GPIO25_REG),
                     (int)REG_GET_FIELD(IO_MUX_GPIO25_REG, MCU_SEL));
+      Serial.printf("ETH: GPIO26(RXD1) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
+                    REG_READ(IO_MUX_GPIO26_REG),
+                    (int)REG_GET_FIELD(IO_MUX_GPIO26_REG, MCU_SEL));
       Serial.printf("ETH: GPIO27(RXDV) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
                     REG_READ(IO_MUX_GPIO27_REG),
                     (int)REG_GET_FIELD(IO_MUX_GPIO27_REG, MCU_SEL));
@@ -248,33 +251,65 @@ void loop() {
                   ETH.macAddress().c_str());
 
     uint32_t dma_status  = REG_READ(0x3FF69014);
+    uint32_t dma_op_mode = REG_READ(0x3FF69018);
     uint32_t dma_tx_list = REG_READ(0x3FF69010);
     uint32_t dma_tx_desc = REG_READ(0x3FF69048);  // dmatxcurrdesc
     uint32_t dma_tx_buf  = REG_READ(0x3FF69050);  // dmatxcurraddr_buf
     uint32_t dma_rx_list = REG_READ(0x3FF6900C);
     uint32_t dma_rx_desc = REG_READ(0x3FF6904C);  // dmarxcurrdesc
-    // MAC base 0x3FF6A000: +0=maccr (tx=bit3,rx=bit2), +0x10=gmiiaddr, +0x18=flowctrl
-    uint32_t mac_cr   = REG_READ(0x3FF6A000);
-    uint32_t mac_ff   = REG_READ(0x3FF6A004);  // frame filter
-    uint32_t mac_flow = REG_READ(0x3FF6A018);
+    // MAC base 0x3FF6A000: +0=maccr, +0x24=emacdebug
+    uint32_t mac_cr    = REG_READ(0x3FF6A000);
+    uint32_t mac_debug = REG_READ(0x3FF6A024);  // emacdebug
+    uint32_t mac_intr  = REG_READ(0x3FF6A038);  // MAC interrupt status
     // EMAC_EX: clkout_conf=+0, oscclk_conf=+4, clk_ctrl=+8, phyinf=+C
     Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x  clk_ctrl=0x%08x\n",
                   REG_READ(0x3FF69800), REG_READ(0x3FF69804), REG_READ(0x3FF69808));
-    // MAC MMC TX counters: base 0x3FF6A100
-    Serial.printf("  MMC_TX: good_frames=0x%08x  good_bytes=0x%08x  errors=0x%08x\n",
-                  REG_READ(0x3FF6A114), REG_READ(0x3FF6A118), REG_READ(0x3FF6A108));
-    Serial.printf("  DMA TX_STATE=%d  ST=%d  TX_LIST=0x%08x  TX_DESC=0x%08x  TX_BUF=0x%08x\n",
+    // MAC MMC TX counters (base 0x3FF6A100):
+    //   +0x08=tx_err  +0x0C=tx_single_col  +0x10=tx_multi_col  +0x14=tx_good_frames  +0x18=tx_good_bytes
+    //   +0x60=tx_carrier_err  +0x68=tx_underflow_err
+    Serial.printf("  MMC_TX: good=%08x bytes=%08x err=%08x scol=%08x mcol=%08x carrier=%08x uflow=%08x\n",
+                  REG_READ(0x3FF6A114), REG_READ(0x3FF6A118), REG_READ(0x3FF6A108),
+                  REG_READ(0x3FF6A10C), REG_READ(0x3FF6A110),
+                  REG_READ(0x3FF6A160), REG_READ(0x3FF6A168));
+    // emacdebug bits: [1:0]=rxfifo_rd_ctrl, [4]=rxfifo_wr_ctrl, [8:5]=rx_smac_ctrl,
+    //   [17:16]=tx_tfifo_rd_ctrl, [19:18]=tx_smac_ctrl, [20]=tx_fifo_full, [21]=tx_fifo_not_empty,
+    //   [22]=rx_frame_in_fifo, [23]=rx_fifo_overflow, [24]=tx_pause_frame_req
+    Serial.printf("  MAC_DEBUG=0x%08x (txFIFO_rd=%d txFIFO_full=%d txFIFO_ne=%d txSMAC=%d)\n",
+                  mac_debug,
+                  (int)((mac_debug >> 16) & 3),  // TX TFIFO read ctrl (0=idle,1=read,2=wait,3=flush)
+                  (int)((mac_debug >> 20) & 1),  // TX FIFO full
+                  (int)((mac_debug >> 21) & 1),  // TX FIFO not empty
+                  (int)((mac_debug >> 18) & 3)); // TX status MAC controller
+    Serial.printf("  MAC_INTR=0x%08x  DMA_INTR_EN=0x%08x\n", mac_intr, REG_READ(0x3FF6901C));
+    Serial.printf("  DMA TX_STATE=%d  OP_MODE=0x%08x  TX_LIST=0x%08x  TX_DESC=0x%08x  TX_BUF=0x%08x\n",
                   (int)((dma_status >> 20) & 0x7),
-                  (int)((REG_READ(0x3FF69018) >> 13) & 1),
+                  dma_op_mode,
                   dma_tx_list, dma_tx_desc, dma_tx_buf);
     Serial.printf("  DMA STATUS=0x%08x  RX_LIST=0x%08x  RX_DESC=0x%08x\n",
                   dma_status, dma_rx_list, dma_rx_desc);
-    Serial.printf("  MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)\n",
+    Serial.printf("  DMA MISSED_FRAMES=0x%08x  CUR_HOST_TX=0x%08x  CUR_HOST_RX=0x%08x\n",
+                  REG_READ(0x3FF69020), REG_READ(0x3FF69054), REG_READ(0x3FF69058));
+    // DMA op_mode bits: bit13=ST(tx_run), bit21=tx_store_fwd, bit20=flush_tx_fifo
+    Serial.printf("  MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)  OP flush=%d sfwd=%d ST=%d\n",
                   mac_cr,
-                  (int)((mac_cr >> 3) & 1),   // tx enable
-                  (int)((mac_cr >> 2) & 1),   // rx enable
-                  (int)((mac_cr >> 11) & 1),  // duplex
-                  (int)((mac_cr >> 14) & 1)); // fast eth speed
+                  (int)((mac_cr >> 3) & 1),       // tx enable
+                  (int)((mac_cr >> 2) & 1),       // rx enable
+                  (int)((mac_cr >> 11) & 1),      // duplex
+                  (int)((mac_cr >> 14) & 1),      // fast eth speed
+                  (int)((dma_op_mode >> 20) & 1), // flush_tx_fifo
+                  (int)((dma_op_mode >> 21) & 1), // tx_store_forward
+                  (int)((dma_op_mode >> 13) & 1));
+    // If MAC_DEBUG shows TX FIFO rd idle (0) and MMC good=0, try forcing mii_clk_tx_en.
+    // EMAC_EX clk_ctrl (+0x08): bit0=ext_en, bit1=int_en, bit3=mii_clk_tx_en, bit4=mii_clk_rx_en
+    static bool clk_fix_tried = false;
+    if (!clk_fix_tried && ETH.linkUp() && REG_READ(0x3FF6A114) == 0) {
+      clk_fix_tried = true;
+      uint32_t clk = REG_READ(0x3FF69808);
+      Serial.printf("  CLK_FIX: clk_ctrl was 0x%08x, setting mii_clk_tx_en (bit3)\n", clk);
+      REG_WRITE(0x3FF69808, clk | (1 << 3));
+      Serial.printf("  CLK_FIX: clk_ctrl now 0x%08x\n", REG_READ(0x3FF69808));
+    }
+
     if (dma_tx_desc >= 0x3FF00000 && dma_tx_desc <= 0x3FFFFFFF) {
       volatile uint32_t* d = (volatile uint32_t*)dma_tx_desc;
       Serial.printf("  TX_DESC @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
