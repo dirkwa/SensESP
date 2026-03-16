@@ -400,15 +400,14 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
   _eth_connected_event_handle = Network.onSysEvent(onEthConnected, ARDUINO_EVENT_ETH_CONNECTED);
 
 #if CONFIG_IDF_TARGET_ESP32
-  // emaccstatus reports speed=0 (MAC clock domain dead) when clk_sel is wrong.
-  // Set ALL 6 bits of ex_clk_ctrl (bits 0-5) to ensure the external
-  // RMII REF_CLK reaches the MAC TX/RX clock domains.
-  // Force ex_oscclk_conf.clk_sel=1 (bit24 of 0x3FF69804 — after 4×6-bit
-  // div fields totaling 24 bits) to select the external clock path.
+  // For RMII external clock input, only ext_en (bit0) must be set.
+  // int_en (bit1) must be 0 — it's for internal clock generation and
+  // conflicts with ext_en. Setting both may disable the external path.
+  // Also force clk_sel=1 (bit24 of ex_oscclk_conf) to select external clock.
   // Both applied before esp_eth_start().
-  REG_WRITE(0x3FF69808, 0x3F);
   if (clock_mode == ETH_CLOCK_GPIO0_IN) {
-    REG_SET_BIT(0x3FF69804, BIT(24));
+    REG_WRITE(0x3FF69808, 0x01);       // ext_en=1, int_en=0, all others=0
+    REG_SET_BIT(0x3FF69804, BIT(24));  // clk_sel=1
   }
 #endif
 

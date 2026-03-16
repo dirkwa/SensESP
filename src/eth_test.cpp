@@ -44,10 +44,10 @@ void onEvent(arduino_event_id_t event) {
       // REF_CLK to reach the RMII TX/RX clock domains. IDF v5
       // emac_ll_clock_enable_rmii_input() only sets ext_en (bit0).
       // Apply here (ETH_START) so it's in place before DHCP queues any TX.
-      // Set ALL ex_clk_ctrl bits (0x3F): ext_en+int_en+rx_125_clk_en+mii_clk_tx_en+mii_clk_rx_en+clk_en
-      // emaccstatus reads 0x00 (speed=0) meaning the MAC clock domain never activated.
-      // The named bits suggest MII-only but they may gate RMII paths too — enable all.
-      REG_WRITE(0x3FF69808, 0x3F);
+      // For RMII external clock input: only ext_en (bit0) must be set.
+      // int_en (bit1) is for internal clock generation and must be 0 —
+      // setting both ext_en+int_en may disable the external clock path.
+      REG_WRITE(0x3FF69808, 0x01);  // ext_en=1, int_en=0
       // ex_oscclk_conf.clk_sel (bit24 of 0x3FF69804) must be 1 to route the
       // external GPIO0 clock through the RMII clock mux.
       // bit24: after 4×6-bit div fields (div_num_10m, h_div_num_10m,
