@@ -392,6 +392,16 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
 
   _eth_connected_event_handle = Network.onSysEvent(onEthConnected, ARDUINO_EVENT_ETH_CONNECTED);
 
+#if CONFIG_IDF_TARGET_ESP32
+  // IDF v5 emac_ll_clock_enable_rmii_input() only sets ext_en (bit0) in
+  // EMAC_EX clk_ctrl (+0x08), but mii_clk_tx_en (bit3) and mii_clk_rx_en (bit4)
+  // must also be set for the 50MHz REF_CLK to reach the RMII TX/RX clock
+  // domains. Without them the MAC TX FIFO read controller never starts and
+  // no frames leave the board. Apply before esp_eth_start() so it is in
+  // place before the first frame is queued.
+  REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4));
+#endif
+
   ret = esp_eth_start(_eth_handle);
   if (ret != ESP_OK) {
     log_e("esp_eth_start failed: %d", ret);

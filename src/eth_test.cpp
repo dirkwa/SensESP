@@ -40,8 +40,14 @@ void onEvent(arduino_event_id_t event) {
       PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-      Serial.printf("ETH: Started (IOMUX confirmed, MCU_SEL=%d need 5)\n",
-                    (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
+      // mii_clk_tx_en (bit3) + mii_clk_rx_en (bit4) must be set for the 50MHz
+      // REF_CLK to reach the RMII TX/RX clock domains. IDF v5
+      // emac_ll_clock_enable_rmii_input() only sets ext_en (bit0).
+      // Apply here (ETH_START) so it's in place before DHCP queues any TX.
+      REG_WRITE(0x3FF69808, REG_READ(0x3FF69808) | (1<<3) | (1<<4));
+      Serial.printf("ETH: Started (IOMUX MCU_SEL=%d need 5, clk_ctrl=0x%08x)\n",
+                    (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
+                    REG_READ(0x3FF69808));
       // Check GPIO18 (MDIO) and GPIO23 (MDC) IOMUX state: MCU_SEL=2 = GPIO matrix
       // RMII TX pins must be MCU_SEL=5 (EMAC IOMUX), not 2 (GPIO matrix)
       Serial.printf("ETH: GPIO19(TXD0) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
@@ -195,18 +201,6 @@ void setup() {
 
   Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
                 REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
-  // EMAC_EX clk_ctrl (+0x08): bit0=ext_en, bit1=int_en, bit3=mii_clk_tx_en, bit4=mii_clk_rx_en
-  // IDF emac_ll_clock_enable_rmii_input() only sets ext_en (bit0), not mii_clk_tx/rx_en.
-  // IDF v4.4 appears to have had mii_clk_tx_en+mii_clk_rx_en set (reset value?).
-  // Force them on here — without them the REF_CLK may not reach the RMII TX/RX paths.
-#if CONFIG_IDF_TARGET_ESP32
-  {
-    uint32_t clk_ctrl = REG_READ(0x3FF69808);
-    REG_WRITE(0x3FF69808, clk_ctrl | (1<<3) | (1<<4));
-    Serial.printf("ETH: clk_ctrl 0x%08x -> 0x%08x (set mii_clk_tx_en+mii_clk_rx_en)\n",
-                  clk_ctrl, REG_READ(0x3FF69808));
-  }
-#endif
   // DPORT_WIFI_CLK_EN bit14=EMAC, EMAC_EX PHYINF bit5=RMII
   // EMAC_DMA_BUS_MODE=0x3FF69000, EMAC_DMA_OP_MODE=0x3FF69018
   Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (after begin)\n",
