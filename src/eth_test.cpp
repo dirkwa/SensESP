@@ -205,8 +205,13 @@ void setup() {
   // EMAC_DMA_BUS_MODE=0x3FF69000, EMAC_DMA_OP_MODE=0x3FF69018
   Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (after begin)\n",
                 REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
-  Serial.printf("ETH: DMA BUS_MODE=0x%08x  OP_MODE=0x%08x  STATUS=0x%08x\n",
-                REG_READ(0x3FF69000), REG_READ(0x3FF69018), REG_READ(0x3FF69014));
+  Serial.printf("ETH: DMA BUS_MODE=0x%08x (alt_desc=%d)  OP_MODE=0x%08x  STATUS=0x%08x\n",
+                REG_READ(0x3FF69000), (int)((REG_READ(0x3FF69000)>>7)&1),
+                REG_READ(0x3FF69018), REG_READ(0x3FF69014));
+  Serial.printf("ETH: MAC_CR=0x%08x (TX=%d RX=%d) after begin\n",
+                REG_READ(0x3FF6A000),
+                (int)((REG_READ(0x3FF6A000)>>3)&1),
+                (int)((REG_READ(0x3FF6A000)>>2)&1));
 
   // Step 6: walk the TX descriptor ring and fix any DES3 (next descriptor
   // pointer) that points outside the descriptor ring (into heap/lwIP buffers).
@@ -270,8 +275,13 @@ void loop() {
     uint32_t mac_debug = REG_READ(0x3FF6A024);  // emacdebug
     uint32_t mac_intr  = REG_READ(0x3FF6A038);  // MAC interrupt status
     // EMAC_EX: clkout_conf=+0, oscclk_conf=+4, clk_ctrl=+8, phyinf=+C
-    Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x  clk_ctrl=0x%08x\n",
-                  REG_READ(0x3FF69800), REG_READ(0x3FF69804), REG_READ(0x3FF69808));
+    // clk_ctrl bits: ext_en(0) int_en(1) rx_125_clk_en(2) mii_clk_tx_en(3) mii_clk_rx_en(4) clk_en(5)
+    // phyinf bits[15:13]=phy_intf_sel (need 4=RMII), oscclk bit20=clk_sel (need 1 for ext clock)
+    uint32_t phyinf_val = REG_READ(0x3FF6980C);
+    uint32_t oscclk_val = REG_READ(0x3FF69804);
+    Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x (clk_sel=%d)  clk_ctrl=0x%08x  phyinf=0x%08x (intf=%d need 4)\n",
+                  REG_READ(0x3FF69800), oscclk_val, (int)((oscclk_val>>20)&1),
+                  REG_READ(0x3FF69808), phyinf_val, (int)((phyinf_val>>13)&7));
     // MMC control at 0x3FF6A100: bit0=reset, bit1=stop_rollover, bit2=reset_on_read, bit3=freeze
     // Standard GMAC MMC TX counter layout (base 0x3FF6A100):
     //   +0x14=tx_octetcount_gb  +0x18=tx_framecount_gb  +0x64=tx_octetcount_g  +0x68=tx_framecount_g
@@ -288,15 +298,18 @@ void loop() {
     Serial.printf("  MMC_RX: gb_frames=%08x gb_bytes=%08x g_bytes=%08x g_frames=%08x crc=%08x\n",
                   REG_READ(0x3FF6A188), REG_READ(0x3FF6A184),
                   REG_READ(0x3FF6A1D8), REG_READ(0x3FF6A1DC), REG_READ(0x3FF6A1C0));
-    // emacdebug bits: [1:0]=rxfifo_rd_ctrl, [4]=rxfifo_wr_ctrl, [8:5]=rx_smac_ctrl,
-    //   [17:16]=tx_tfifo_rd_ctrl, [19:18]=tx_smac_ctrl, [20]=tx_fifo_full, [21]=tx_fifo_not_empty,
-    //   [22]=rx_frame_in_fifo, [23]=rx_fifo_overflow, [24]=tx_pause_frame_req
-    Serial.printf("  MAC_DEBUG=0x%08x (txFIFO_rd=%d txFIFO_full=%d txFIFO_ne=%d txSMAC=%d)\n",
+    // emacdebug correct bit layout (from emac_mac_struct.h):
+    //   [0]=macrpes, [2:1]=macrffcs, [4]=mtlrfwcas, [6:5]=mtlrfrcs, [9:8]=mtlrffls
+    //   [16]=mactpes(TX proto eng), [18:17]=mactfcs(TX frame ctrl), [19]=mactp(TX pause)
+    //   [21:20]=mtltfrcs(TX FIFO rd ctrl: 0=idle,1=read,2=wait_status,3=flush)
+    //   [22]=mtltfwcs(TX FIFO wr ctrl active), [24]=mtltfnes(TX FIFO not empty), [25]=mtltsffs
+    Serial.printf("  MAC_DEBUG=0x%08x (TX_proto=%d TX_fc=%d TX_fifo_rd=%d TX_fifo_ne=%d TX_fifo_wr=%d)\n",
                   mac_debug,
-                  (int)((mac_debug >> 16) & 3),  // TX TFIFO read ctrl (0=idle,1=read,2=wait,3=flush)
-                  (int)((mac_debug >> 20) & 1),  // TX FIFO full
-                  (int)((mac_debug >> 21) & 1),  // TX FIFO not empty
-                  (int)((mac_debug >> 18) & 3)); // TX status MAC controller
+                  (int)((mac_debug >> 16) & 1),   // mactpes: TX MAC protocol engine active
+                  (int)((mac_debug >> 17) & 3),   // mactfcs: TX frame ctrl state (0=idle,1=wait,2=pause,3=xfer)
+                  (int)((mac_debug >> 20) & 3),   // mtltfrcs: TX FIFO read ctrl state
+                  (int)((mac_debug >> 24) & 1),   // mtltfnes: TX FIFO not empty
+                  (int)((mac_debug >> 22) & 1));  // mtltfwcs: TX FIFO write ctrl active
     Serial.printf("  MAC_INTR=0x%08x  DMA_INTR_EN=0x%08x\n", mac_intr, REG_READ(0x3FF6901C));
     Serial.printf("  DMA TX_STATE=%d  OP_MODE=0x%08x  TX_LIST=0x%08x  TX_DESC=0x%08x  TX_BUF=0x%08x\n",
                   (int)((dma_status >> 20) & 0x7),
@@ -306,8 +319,8 @@ void loop() {
                   dma_status, dma_rx_list, dma_rx_desc);
     Serial.printf("  DMA MISSED_FRAMES=0x%08x  CUR_HOST_TX=0x%08x  CUR_HOST_RX=0x%08x\n",
                   REG_READ(0x3FF69020), REG_READ(0x3FF69054), REG_READ(0x3FF69058));
-    // DMA op_mode bits: bit13=ST(tx_run), bit21=tx_store_fwd, bit20=flush_tx_fifo
-    Serial.printf("  MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)  OP flush=%d sfwd=%d ST=%d\n",
+    // DMA op_mode bits: bit1=SR(rx_run), bit13=ST(tx_run), bit20=flush_tx_fifo, bit21=tx_store_fwd
+    Serial.printf("  MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)  OP flush=%d sfwd=%d ST=%d SR=%d\n",
                   mac_cr,
                   (int)((mac_cr >> 3) & 1),       // tx enable
                   (int)((mac_cr >> 2) & 1),       // rx enable
@@ -315,7 +328,16 @@ void loop() {
                   (int)((mac_cr >> 14) & 1),      // fast eth speed
                   (int)((dma_op_mode >> 20) & 1), // flush_tx_fifo
                   (int)((dma_op_mode >> 21) & 1), // tx_store_forward
-                  (int)((dma_op_mode >> 13) & 1));
+                  (int)((dma_op_mode >> 13) & 1), // ST: DMA TX run
+                  (int)((dma_op_mode >>  1) & 1));// SR: DMA RX run
+    // If MAC TX is not enabled, force-enable it and kick the DMA TX poll demand.
+    // This tells us whether MAC_CR TX=0 is the reason TX never fires.
+    if (!((mac_cr >> 3) & 1)) {
+      Serial.println("  *** MAC TX not enabled! Force-enabling MAC_CR bit3 + DMA TX poll demand ***");
+      REG_SET_BIT(0x3FF6A000, BIT(3));  // gmacconfig.tx = 1
+      REG_WRITE(0x3FF69004, 1);         // dmatxpolldemand = 1 (resume)
+      Serial.printf("  MAC_CR after fix=0x%08x\n", REG_READ(0x3FF6A000));
+    }
     Serial.printf("  DPORT: WIFI_CLK_EN=0x%08x  CORE_RST=0x%08x\n",
                   DPORT_READ_PERI_REG(0x3FF000CC), DPORT_READ_PERI_REG(0x3FF0D0D0));
     // MAC Timestamp control at 0x3FF6A700: bit0=ts_enable, bit8=ts_all_frames
