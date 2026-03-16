@@ -409,6 +409,13 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
     REG_WRITE(0x3FF69808, 0x01);       // ext_en=1, int_en=0, all others=0
     REG_SET_BIT(0x3FF69804, BIT(24));  // clk_sel=1
   }
+  // The IDF enables alt_desc (32-byte enhanced descriptors) and sets TTSE
+  // (bit30) in every TX descriptor, causing DMA TX_STATE=6 (timestamp write)
+  // for every frame. In chained descriptor mode, alt_desc only affects whether
+  // the DMA writes back TDES4-TDES7 (timestamp words). With alt_desc=0, TTSE
+  // is ignored and the DMA uses 4-word descriptors — chaining still works via
+  // DES3 next-pointer. Clear alt_desc here so the DMA never enters TX_STATE=6.
+  REG_CLR_BIT(0x3FF69000, BIT(7));  // alt_desc_size=0
 #endif
 
   ret = esp_eth_start(_eth_handle);
