@@ -101,14 +101,22 @@ void onEvent(arduino_event_id_t event) {
       #define EMAC_GMIIADDR 0x3FF6A010
       #define EMAC_GMIIDATA 0x3FF6A014
       #endif
-      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(1<<6)|(0<<2)|(0<<1)|(1<<0)); // PHY=1,reg=1(BMSR),CR=0,read
-      uint32_t t2 = millis(); while ((REG_READ(EMAC_GMIIADDR)&1) && (millis()-t2<10)) {}
-      uint32_t bmsr = REG_READ(EMAC_GMIIDATA) & 0xFFFF;
-      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(0<<6)|(0<<2)|(0<<1)|(1<<0)); // PHY=1,reg=0(BMCR),CR=0,read
-      t2 = millis(); while ((REG_READ(EMAC_GMIIADDR)&1) && (millis()-t2<10)) {}
-      uint32_t bmcr = REG_READ(EMAC_GMIIDATA) & 0xFFFF;
-      Serial.printf("ETH: PHY BMSR=0x%04x (link=%d)  BMCR=0x%04x\n",
-                    bmsr, (int)((bmsr>>2)&1), bmcr);
+      auto mdio_rd = [](int reg) -> uint16_t {
+        REG_WRITE(EMAC_GMIIADDR, (1<<11)|(reg<<6)|(0<<2)|(0<<1)|(1<<0));
+        uint32_t t2 = millis(); while ((REG_READ(EMAC_GMIIADDR)&1) && (millis()-t2<10)) {}
+        return (uint16_t)(REG_READ(EMAC_GMIIDATA) & 0xFFFF);
+      };
+      uint16_t bmcr  = mdio_rd(0);
+      uint16_t bmsr  = mdio_rd(1);
+      uint16_t anar  = mdio_rd(4);   // AN advertise
+      uint16_t anlpar= mdio_rd(5);   // AN link partner
+      uint16_t pscsr = mdio_rd(31);  // Special Control/Status (LAN8720 reg31)
+      Serial.printf("ETH: PHY BMSR=0x%04x (link=%d aneg=%d)  BMCR=0x%04x\n",
+                    bmsr, (int)((bmsr>>2)&1), (int)((bmsr>>5)&1), bmcr);
+      Serial.printf("ETH: PHY ANAR=0x%04x  ANLPAR=0x%04x\n", anar, anlpar);
+      // PSCSR bits[4:2]: 001=10H,010=10F,101=100H,110=100F
+      Serial.printf("ETH: PHY PSCSR(31)=0x%04x  speed_ind=%d\n",
+                    pscsr, (pscsr>>2)&7);
       break;
     }
     case ARDUINO_EVENT_ETH_GOT_IP:
