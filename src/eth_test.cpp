@@ -269,10 +269,15 @@ void loop() {
     // MAC MMC TX counters (base 0x3FF6A100):
     //   +0x08=tx_err  +0x0C=tx_single_col  +0x10=tx_multi_col  +0x14=tx_good_frames  +0x18=tx_good_bytes
     //   +0x60=tx_carrier_err  +0x68=tx_underflow_err
+    // MAC MMC RX counters:
+    //   +0xD4=rx_good_frames  +0xD8=rx_good_bytes  +0xC0=rx_crc_err  +0xC4=rx_align_err  +0xD0=rx_ucast
     Serial.printf("  MMC_TX: good=%08x bytes=%08x err=%08x scol=%08x mcol=%08x carrier=%08x uflow=%08x\n",
                   REG_READ(0x3FF6A114), REG_READ(0x3FF6A118), REG_READ(0x3FF6A108),
                   REG_READ(0x3FF6A10C), REG_READ(0x3FF6A110),
                   REG_READ(0x3FF6A160), REG_READ(0x3FF6A168));
+    Serial.printf("  MMC_RX: good=%08x bytes=%08x crc_err=%08x align_err=%08x ucast=%08x\n",
+                  REG_READ(0x3FF6A1D4), REG_READ(0x3FF6A1D8), REG_READ(0x3FF6A1C0),
+                  REG_READ(0x3FF6A1C4), REG_READ(0x3FF6A1D0));
     // emacdebug bits: [1:0]=rxfifo_rd_ctrl, [4]=rxfifo_wr_ctrl, [8:5]=rx_smac_ctrl,
     //   [17:16]=tx_tfifo_rd_ctrl, [19:18]=tx_smac_ctrl, [20]=tx_fifo_full, [21]=tx_fifo_not_empty,
     //   [22]=rx_frame_in_fifo, [23]=rx_fifo_overflow, [24]=tx_pause_frame_req
