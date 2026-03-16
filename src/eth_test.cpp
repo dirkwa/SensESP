@@ -221,34 +221,39 @@ void setup() {
                 (int)((REG_READ(0x3FF6A000)>>3)&1),
                 (int)((REG_READ(0x3FF6A000)>>2)&1));
 
-  // Step 6: walk the TX descriptor ring and fix any DES3 (next descriptor
-  // pointer) that points outside the descriptor ring (into heap/lwIP buffers).
-  // The last descriptor's DES3 must wrap back to TX_LIST_BASE.
-  uint32_t tx_base = REG_READ(0x3FF69010);
-  if (tx_base != 0) {
-    // Find the last descriptor in the ring (DES3 points outside DRAM or wraps)
-    uint32_t desc = tx_base;
-    uint32_t prev = 0;
-    int count = 0;
-    while (count < 64) {
-      volatile uint32_t* d = (volatile uint32_t*)desc;
-      uint32_t des3 = d[3];
-      if (des3 == tx_base) { // already a good ring
-        Serial.printf("ETH: TX ring already good (%d descriptors)\n", count);
-        break;
-      }
-      if (des3 < 0x3FF00000 || des3 > 0x3FFFFFFF) {
-        // DES3 is null/invalid — this is the last descriptor, fix it to wrap
-        Serial.printf("ETH: fixing TX ring end: desc@0x%08x DES3=0x%08x -> 0x%08x\n",
-                      desc, des3, tx_base);
-        d[3] = tx_base;
-        Serial.printf("ETH: TX ring fixed (%d descriptors)\n", count + 1);
-        break;
-      }
-      prev = desc;
-      desc = des3;
-      count++;
-    }
+  // DMA TX_STATE=6 = "writing timestamp" — the IDF enables IEEE 1588 timestamping
+  // (MAC_TS_CTRL bit0) and alt_desc (DMA BUS_MODE bit7, 32-byte enhanced descriptors
+  // with TDES4/TDES5). lwIP allocates standard 4-word descriptors, so the DMA
+  // tries to write timestamps to non-existent TDES4/TDES5 and hangs permanently.
+  // Fix: stop DMA TX/RX, clear alt_desc + timestamp, restart DMA.
+  {
+    uint32_t ts_ctrl = REG_READ(0x3FF6A700);
+    uint32_t bus_mode = REG_READ(0x3FF69000);
+    Serial.printf("ETH: before ts fix: MAC_TS_CTRL=0x%08x  DMA_BUS_MODE=0x%08x (alt_desc=%d)\n",
+                  ts_ctrl, bus_mode, (int)((bus_mode>>7)&1));
+    // Stop DMA TX and RX (clear ST bit13 and SR bit1 of OP_MODE)
+    uint32_t op = REG_READ(0x3FF69018);
+    REG_WRITE(0x3FF69018, op & ~((1<<13)|(1<<1)));
+    // Wait for DMA to reach stopped state
+    uint32_t t0 = millis();
+    while ((REG_READ(0x3FF69014) & 0x00600000) && (millis()-t0 < 50)) {}
+    // Flush TX FIFO
+    REG_SET_BIT(0x3FF69018, (1<<20));
+    t0 = millis();
+    while ((REG_READ(0x3FF69018) & (1<<20)) && (millis()-t0 < 50)) {}
+    // Clear alt_desc (bit7) from DMA BUS_MODE — standard 4-word descriptors
+    REG_CLR_BIT(0x3FF69000, BIT(7));
+    // Clear MAC timestamp enable (bit0 of MAC_TS_CTRL at 0x3FF6A700)
+    REG_CLR_BIT(0x3FF6A700, BIT(0));
+    // Clear MAC timestamp snapshot for all frames (bit8)
+    REG_CLR_BIT(0x3FF6A700, BIT(8));
+    // Restart DMA TX and RX
+    REG_WRITE(0x3FF69018, op | (1<<13)|(1<<1));
+    // Kick TX poll demand
+    REG_WRITE(0x3FF69004, 1);
+    Serial.printf("ETH: after ts fix: MAC_TS_CTRL=0x%08x  DMA_BUS_MODE=0x%08x (alt_desc=%d)  DMA_STATUS=0x%08x\n",
+                  REG_READ(0x3FF6A700), REG_READ(0x3FF69000), (int)((REG_READ(0x3FF69000)>>7)&1),
+                  REG_READ(0x3FF69014));
   }
 }
 
