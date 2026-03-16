@@ -301,46 +301,8 @@ void loop() {
                   (int)((dma_op_mode >> 20) & 1), // flush_tx_fifo
                   (int)((dma_op_mode >> 21) & 1), // tx_store_forward
                   (int)((dma_op_mode >> 13) & 1));
-    // If MAC_DEBUG shows TX FIFO rd idle (0) and MMC good=0, try forcing mii_clk_tx_en.
-    // EMAC_EX clk_ctrl (+0x08): bit0=ext_en, bit1=int_en, bit3=mii_clk_tx_en, bit4=mii_clk_rx_en
-    // DPORT registers for EMAC clock:
-    // DPORT_WIFI_CLK_EN_REG (0x3FF000CC): bit14=EMAC clock gate
-    // DPORT_CORE_RST_EN_REG (0x3FF0D0D0): bit2=EMAC reset
-    // Must use DPORT_READ_PERI_REG for DPORT bus isolation on dual-core ESP32.
     Serial.printf("  DPORT: WIFI_CLK_EN=0x%08x  CORE_RST=0x%08x\n",
                   DPORT_READ_PERI_REG(0x3FF000CC), DPORT_READ_PERI_REG(0x3FF0D0D0));
-
-    static bool clk_fix_tried = false;
-    if (!clk_fix_tried && ETH.linkUp() && REG_READ(0x3FF6A114) == 0) {
-      clk_fix_tried = true;
-      // The MTL TX FIFO has data (mtltfnes=1) but the read controller is idle (mtltfrcs=0).
-      // This means the 50MHz REF_CLK is not reaching the MTL TX FIFO clock domain.
-      // Try: zero ex_clkout_conf, set all clock enables, restore clk_sel=1 (external).
-      uint32_t clkout_was = REG_READ(0x3FF69800);
-      REG_WRITE(0x3FF69800, 0x00000000);
-      Serial.printf("  CLK_FIX1: ex_clkout_conf 0x%08x -> 0x%08x\n", clkout_was, REG_READ(0x3FF69800));
-      // Set ext_en + mii_clk_tx_en + mii_clk_rx_en, clear int_en.
-      REG_WRITE(0x3FF69808, (1<<0)|(1<<3)|(1<<4));
-      Serial.printf("  CLK_FIX2: ex_clk_ctrl -> 0x%08x\n", REG_READ(0x3FF69808));
-      // Restore clk_sel=1 (external crystal/oscillator path, not internal).
-      uint32_t osc = REG_READ(0x3FF69804);
-      REG_WRITE(0x3FF69804, osc | (1 << 24));
-      Serial.printf("  CLK_FIX3: ex_oscclk_conf -> 0x%08x\n", REG_READ(0x3FF69804));
-      // Re-apply GPIO0 IOMUX as RMII REF_CLK input (FUNC_GPIO0_EMAC_TX_CLK=5).
-      REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
-      PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
-      CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
-      CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-      Serial.printf("  CLK_FIX4: GPIO0 IOMUX MCU_SEL=%d  val=0x%08x\n",
-                    (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL), REG_READ(IO_MUX_GPIO0_REG));
-      // Flush+restart TX DMA: write 1 to flush_tx_fifo (bit20) then clear it, then poll demand.
-      uint32_t op = REG_READ(0x3FF69018);
-      REG_WRITE(0x3FF69018, op | (1 << 20));  // flush TX FIFO
-      delayMicroseconds(10);
-      REG_WRITE(0x3FF69018, op & ~(1 << 20)); // clear flush
-      REG_WRITE(0x3FF69010, 0x1);             // TX poll demand
-      Serial.printf("  CLK_FIX5: TX FIFO flushed+polled  STATUS=0x%08x\n", REG_READ(0x3FF69014));
-    }
 
     if (dma_tx_desc >= 0x3FF00000 && dma_tx_desc <= 0x3FFFFFFF) {
       volatile uint32_t* d = (volatile uint32_t*)dma_tx_desc;
