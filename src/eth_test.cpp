@@ -348,7 +348,7 @@ void loop() {
     if (tx_fifo_ne && tx_fc_idle) {
       tx_stuck_count++;
       Serial.printf("  TX FIFO stuck (%d): toggling MAC_CR TX off/on + poll demand\n", tx_stuck_count);
-      REG_CLEAR_BIT(0x3FF6A000, BIT(3));  // disable MAC TX
+      REG_CLR_BIT(0x3FF6A000, BIT(3));  // disable MAC TX
       asm volatile("nop; nop; nop; nop; nop; nop; nop; nop;");
       REG_SET_BIT(0x3FF6A000, BIT(3));    // re-enable MAC TX
       REG_WRITE(0x3FF69004, 1);           // dmatxpolldemand: kick DMA TX
