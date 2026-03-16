@@ -45,9 +45,13 @@ void onEvent(arduino_event_id_t event) {
       // emac_ll_clock_enable_rmii_input() only sets ext_en (bit0).
       // Apply here (ETH_START) so it's in place before DHCP queues any TX.
       REG_WRITE(0x3FF69808, REG_READ(0x3FF69808) | (1<<3) | (1<<4) | (1<<5));
-      Serial.printf("ETH: Started (IOMUX MCU_SEL=%d need 5, clk_ctrl=0x%08x)\n",
+      // ex_oscclk_conf.clk_sel (bit20 of 0x3FF69804) must be 1 to route the
+      // external GPIO0 clock through the RMII clock mux. Observed to read 0
+      // despite emac_ll_clock_enable_rmii_input() setting it; force it here.
+      REG_SET_BIT(0x3FF69804, BIT(20));
+      Serial.printf("ETH: Started (IOMUX MCU_SEL=%d need 5, clk_ctrl=0x%08x oscclk=0x%08x)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
-                    REG_READ(0x3FF69808));
+                    REG_READ(0x3FF69808), REG_READ(0x3FF69804));
       // Check GPIO18 (MDIO) and GPIO23 (MDC) IOMUX state: MCU_SEL=2 = GPIO matrix
       // RMII TX pins must be MCU_SEL=5 (EMAC IOMUX), not 2 (GPIO matrix)
       Serial.printf("ETH: GPIO19(TXD0) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",

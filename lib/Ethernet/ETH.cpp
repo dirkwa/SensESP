@@ -401,6 +401,13 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
   // place before the first frame is queued.
   // Also set clk_en (bit5) which gates the main EMAC clock path.
   REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4) | BIT(5));
+  // emac_ll_clock_enable_rmii_input() sets ex_oscclk_conf.clk_sel=1 to route
+  // the external clock (GPIO0) through the RMII clock mux. Observed in practice
+  // the field reads back as 0, so force it here as well.
+  // ex_oscclk_conf is at EMAC_EX base+0x04 = 0x3FF69804; clk_sel is bit20.
+  if (clock_mode == ETH_CLOCK_GPIO0_IN) {
+    REG_SET_BIT(0x3FF69804, BIT(20));
+  }
 #endif
 
   ret = esp_eth_start(_eth_handle);
