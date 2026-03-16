@@ -257,6 +257,12 @@ void loop() {
     uint32_t mac_cr   = REG_READ(0x3FF6A000);
     uint32_t mac_ff   = REG_READ(0x3FF6A004);  // frame filter
     uint32_t mac_flow = REG_READ(0x3FF6A018);
+    // EMAC_EX: clkout_conf=+0, oscclk_conf=+4, clk_ctrl=+8, phyinf=+C
+    Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x  clk_ctrl=0x%08x\n",
+                  REG_READ(0x3FF69800), REG_READ(0x3FF69804), REG_READ(0x3FF69808));
+    // MAC MMC TX counters: base 0x3FF6A100
+    Serial.printf("  MMC_TX: good_frames=0x%08x  good_bytes=0x%08x  errors=0x%08x\n",
+                  REG_READ(0x3FF6A114), REG_READ(0x3FF6A118), REG_READ(0x3FF6A108));
     Serial.printf("  DMA TX_STATE=%d  ST=%d  TX_LIST=0x%08x  TX_DESC=0x%08x  TX_BUF=0x%08x\n",
                   (int)((dma_status >> 20) & 0x7),
                   (int)((REG_READ(0x3FF69018) >> 13) & 1),
@@ -278,6 +284,15 @@ void loop() {
     static bool tx_ring_dumped = false;
     if (!tx_ring_dumped && dma_tx_list >= 0x3FF00000 && dma_tx_list <= 0x3FFFFFFF) {
       tx_ring_dumped = true;
+      // Dump first 32 bytes of TX[0] buffer (should be Ethernet frame: dst MAC, src MAC, ethertype...)
+      volatile uint32_t* tx0d = (volatile uint32_t*)dma_tx_list;
+      uint32_t tx0_buf = tx0d[2];
+      if (tx0_buf >= 0x3FF00000 && tx0_buf <= 0x3FFFFFFF) {
+        volatile uint8_t* buf = (volatile uint8_t*)tx0_buf;
+        Serial.printf("  TX[0] buf @0x%08x first 32 bytes:\n    ", tx0_buf);
+        for (int i = 0; i < 32; i++) Serial.printf("%02x ", buf[i]);
+        Serial.println();
+      }
       Serial.println("  TX descriptor ring dump:");
       uint32_t desc = dma_tx_list;
       for (int i = 0; i < 32; i++) {
