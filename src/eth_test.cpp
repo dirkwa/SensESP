@@ -241,15 +241,34 @@ void setup() {
     REG_SET_BIT(0x3FF69018, (1<<20));
     t0 = millis();
     while ((REG_READ(0x3FF69018) & (1<<20)) && (millis()-t0 < 50)) {}
-    // Clear alt_desc (bit7) from DMA BUS_MODE — standard 4-word descriptors
-    REG_CLR_BIT(0x3FF69000, BIT(7));
-    // Clear MAC timestamp enable (bit0 of MAC_TS_CTRL at 0x3FF6A700)
-    REG_CLR_BIT(0x3FF6A700, BIT(0));
-    // Clear MAC timestamp snapshot for all frames (bit8)
-    REG_CLR_BIT(0x3FF6A700, BIT(8));
+    // Do NOT clear alt_desc — the descriptor ring was allocated with 32-byte
+    // (8-word) spacing to match alt_desc=1.  Changing it here would misalign
+    // the DMA's view of the ring.
+    //
+    // The real problem: TX[0..1] DES0 has bit30 (TTSE) set, asking the DMA to
+    // write a timestamp to TDES6/TDES7. lwIP only allocates words 0-3 (16 bytes),
+    // so TDES6/TDES7 live in adjacent heap memory — the DMA corrupts heap and
+    // then stays in TX_STATE=6 forever.
+    // Fix: clear TTSE (bit30) from every TX descriptor that has OWN=1.
+    {
+      uint32_t tx_base = REG_READ(0x3FF69010);
+      if (tx_base >= 0x3FF00000 && tx_base <= 0x3FFFFFFF) {
+        uint32_t d_addr = tx_base;
+        for (int i = 0; i < 32; i++) {
+          volatile uint32_t* d = (volatile uint32_t*)d_addr;
+          if (d[0] & BIT(30)) {
+            d[0] &= ~BIT(30);  // clear TTSE
+          }
+          uint32_t next = d[3];
+          if (next == tx_base) break;
+          if (next < 0x3FF00000 || next > 0x3FFFFFFF) break;
+          d_addr = next;
+        }
+      }
+    }
     // Restart DMA TX and RX
     REG_WRITE(0x3FF69018, op | (1<<13)|(1<<1));
-    // Kick TX poll demand
+    // Kick TX poll demand to unstick the DMA from TX_STATE=6
     REG_WRITE(0x3FF69004, 1);
     Serial.printf("ETH: after ts fix: MAC_TS_CTRL=0x%08x  DMA_BUS_MODE=0x%08x (alt_desc=%d)  DMA_STATUS=0x%08x\n",
                   REG_READ(0x3FF6A700), REG_READ(0x3FF69000), (int)((REG_READ(0x3FF69000)>>7)&1),
@@ -348,19 +367,30 @@ void loop() {
                   (int)((dma_op_mode >> 21) & 1), // tx_store_forward
                   (int)((dma_op_mode >> 13) & 1), // ST: DMA TX run
                   (int)((dma_op_mode >>  1) & 1));// SR: DMA RX run
-    // If MAC TX FIFO has data but MAC TX frame controller is idle, the RMII TX
-    // clock may not be reaching the MTL TX FIFO read controller. Try toggling
-    // MAC TX off/on to force the MAC TX FSM to re-latch the clock.
-    static int tx_stuck_count = 0;
-    bool tx_fifo_ne = (mac_debug >> 24) & 1;
-    bool tx_fc_idle = !((mac_debug >> 17) & 3);
-    if (tx_fifo_ne && tx_fc_idle) {
-      tx_stuck_count++;
-      Serial.printf("  TX FIFO stuck (%d): toggling MAC_CR TX off/on + poll demand\n", tx_stuck_count);
-      REG_CLR_BIT(0x3FF6A000, BIT(3));  // disable MAC TX
-      asm volatile("nop; nop; nop; nop; nop; nop; nop; nop;");
-      REG_SET_BIT(0x3FF6A000, BIT(3));    // re-enable MAC TX
-      REG_WRITE(0x3FF69004, 1);           // dmatxpolldemand: kick DMA TX
+    // The IDF sets TTSE (bit30) in each TX descriptor DES0, requesting a
+    // timestamp write to TDES6/TDES7. lwIP 8-word descriptors have words 4-7
+    // as part of the 32-byte alt_desc layout but the IDF driver only initialises
+    // words 0-3; TDES6/TDES7 overlap the next descriptor's words 2-3 (DES2/DES3).
+    // Clear TTSE from every descriptor that still has OWN=1 (not yet sent),
+    // then kick the DMA if TX_STATE=6 (stuck writing timestamp).
+    {
+      uint32_t tx_base2 = REG_READ(0x3FF69010);
+      if (tx_base2 >= 0x3FF00000 && tx_base2 <= 0x3FFFFFFF) {
+        uint32_t d_addr2 = tx_base2;
+        for (int i = 0; i < 32; i++) {
+          volatile uint32_t* d2 = (volatile uint32_t*)d_addr2;
+          if (d2[0] & BIT(30)) d2[0] &= ~BIT(30);  // clear TTSE
+          uint32_t next2 = d2[3];  // chained: next pointer at word 3 (TDES3)
+          if (next2 == tx_base2) break;
+          if (next2 < 0x3FF00000 || next2 > 0x3FFFFFFF) break;
+          d_addr2 = next2;
+        }
+      }
+    }
+    int tx_state = (dma_status >> 20) & 0x7;
+    if (tx_state == 6) {
+      Serial.printf("  TX_STATE=6: clearing TTSE and kicking DMA\n");
+      REG_WRITE(0x3FF69004, 1);  // dmatxpolldemand
     }
     Serial.printf("  DPORT: WIFI_CLK_EN=0x%08x  CORE_RST=0x%08x\n",
                   DPORT_READ_PERI_REG(0x3FF000CC), DPORT_READ_PERI_REG(0x3FF0D0D0));
