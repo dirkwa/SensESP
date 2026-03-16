@@ -318,11 +318,22 @@ void loop() {
                   (int)((dma_op_mode >> 13) & 1));
     Serial.printf("  DPORT: WIFI_CLK_EN=0x%08x  CORE_RST=0x%08x\n",
                   DPORT_READ_PERI_REG(0x3FF000CC), DPORT_READ_PERI_REG(0x3FF0D0D0));
+    // MAC Timestamp control at 0x3FF6A700: bit0=ts_enable, bit8=ts_all_frames
+    // If bit0=1 the DMA writes timestamps to TDES4/TDES5 (words 4+5 of each TX descriptor).
+    // Standard 4-word descriptors don't have these words — DMA corrupts adjacent memory.
+    Serial.printf("  MAC_TS_CTRL=0x%08x  (bit0=ts_en bit8=all_frames)\n",
+                  REG_READ(0x3FF6A700));
 
     if (dma_tx_desc >= 0x3FF00000 && dma_tx_desc <= 0x3FFFFFFF) {
       volatile uint32_t* d = (volatile uint32_t*)dma_tx_desc;
       Serial.printf("  TX_DESC @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
                     dma_tx_desc, d[0], d[1], d[2], d[3], (int)(d[0] >> 31));
+    }
+    // Check TX[0] for TDES4/TDES5 (timestamp words — written by DMA if timestamping enabled)
+    if (dma_tx_list >= 0x3FF00000 && dma_tx_list <= 0x3FFFFFFF) {
+      volatile uint32_t* d = (volatile uint32_t*)dma_tx_list;
+      Serial.printf("  TX[0] DES0..5: %08x %08x %08x %08x | %08x %08x\n",
+                    d[0], d[1], d[2], d[3], d[4], d[5]);
     }
     // Dump all TX descriptors once (only on first poll)
     static bool tx_ring_dumped = false;
