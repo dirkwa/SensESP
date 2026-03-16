@@ -69,10 +69,32 @@ void onEvent(arduino_event_id_t event) {
       ETH.setHostname("eth-test");
       break;
     }
-    case ARDUINO_EVENT_ETH_CONNECTED:
+    case ARDUINO_EVENT_ETH_CONNECTED: {
+      uint32_t mac_cr = REG_READ(0x3FF6A000);
       Serial.printf("ETH: Link up  TX_LIST=0x%08x  RX_LIST=0x%08x  OP_MODE=0x%08x\n",
                     REG_READ(0x3FF69010), REG_READ(0x3FF6900C), REG_READ(0x3FF69018));
+      Serial.printf("ETH: MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)  FLOW=0x%08x\n",
+                    mac_cr,
+                    (int)((mac_cr >> 3) & 1),
+                    (int)((mac_cr >> 2) & 1),
+                    (int)((mac_cr >> 11) & 1),
+                    (int)((mac_cr >> 14) & 1),
+                    REG_READ(0x3FF6A018));
+      // PHY BMSR (reg1) and BMCR (reg0) via MDIO
+      #ifndef EMAC_GMIIADDR
+      #define EMAC_GMIIADDR 0x3FF6A010
+      #define EMAC_GMIIDATA 0x3FF6A014
+      #endif
+      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(1<<6)|(0<<2)|(0<<1)|(1<<0)); // PHY=1,reg=1(BMSR),CR=0,read
+      uint32_t t2 = millis(); while ((REG_READ(EMAC_GMIIADDR)&1) && (millis()-t2<10)) {}
+      uint32_t bmsr = REG_READ(EMAC_GMIIDATA) & 0xFFFF;
+      REG_WRITE(EMAC_GMIIADDR, (1<<11)|(0<<6)|(0<<2)|(0<<1)|(1<<0)); // PHY=1,reg=0(BMCR),CR=0,read
+      t2 = millis(); while ((REG_READ(EMAC_GMIIADDR)&1) && (millis()-t2<10)) {}
+      uint32_t bmcr = REG_READ(EMAC_GMIIDATA) & 0xFFFF;
+      Serial.printf("ETH: PHY BMSR=0x%04x (link=%d)  BMCR=0x%04x\n",
+                    bmsr, (int)((bmsr>>2)&1), bmcr);
       break;
+    }
     case ARDUINO_EVENT_ETH_GOT_IP:
       Serial.printf("ETH: Got IP: %s  MAC: %s\n",
                     ETH.localIP().toString().c_str(),
@@ -203,19 +225,30 @@ void loop() {
 
     uint32_t dma_status  = REG_READ(0x3FF69014);
     uint32_t dma_tx_list = REG_READ(0x3FF69010);
-    uint32_t dma_tx_curr = REG_READ(0x3FF69050);
+    uint32_t dma_tx_desc = REG_READ(0x3FF69048);  // dmatxcurrdesc
+    uint32_t dma_tx_buf  = REG_READ(0x3FF69050);  // dmatxcurraddr_buf
     uint32_t dma_rx_list = REG_READ(0x3FF6900C);
-    uint32_t dma_rx_curr = REG_READ(0x3FF69054);
-    Serial.printf("  DMA TX_STATE=%d  TX_LIST=0x%08x  TX_CURR=0x%08x\n",
+    uint32_t dma_rx_desc = REG_READ(0x3FF6904C);  // dmarxcurrdesc
+    // MAC base 0x3FF6A000: +0=maccr (tx=bit3,rx=bit2), +0x10=gmiiaddr, +0x18=flowctrl
+    uint32_t mac_cr   = REG_READ(0x3FF6A000);
+    uint32_t mac_ff   = REG_READ(0x3FF6A004);  // frame filter
+    uint32_t mac_flow = REG_READ(0x3FF6A018);
+    Serial.printf("  DMA TX_STATE=%d  ST=%d  TX_LIST=0x%08x  TX_DESC=0x%08x  TX_BUF=0x%08x\n",
                   (int)((dma_status >> 20) & 0x7),
-                  dma_tx_list, dma_tx_curr);
-    Serial.printf("  RX_LIST=0x%08x  RX_CURR=0x%08x\n", dma_rx_list, dma_rx_curr);
-    if (dma_tx_curr >= 0x3FF00000 && dma_tx_curr <= 0x3FFFFFFF) {
-      uint32_t d0 = *((volatile uint32_t*)(dma_tx_curr + 0));
-      uint32_t d2 = *((volatile uint32_t*)(dma_tx_curr + 8));
-      uint32_t d3 = *((volatile uint32_t*)(dma_tx_curr + 12));
-      Serial.printf("  TX_CURR desc: DES0=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
-                    d0, d2, d3, (int)(d0 >> 31));
+                  (int)((REG_READ(0x3FF69018) >> 13) & 1),
+                  dma_tx_list, dma_tx_desc, dma_tx_buf);
+    Serial.printf("  DMA STATUS=0x%08x  RX_LIST=0x%08x  RX_DESC=0x%08x\n",
+                  dma_status, dma_rx_list, dma_rx_desc);
+    Serial.printf("  MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)\n",
+                  mac_cr,
+                  (int)((mac_cr >> 3) & 1),   // tx enable
+                  (int)((mac_cr >> 2) & 1),   // rx enable
+                  (int)((mac_cr >> 11) & 1),  // duplex
+                  (int)((mac_cr >> 14) & 1)); // fast eth speed
+    if (dma_tx_desc >= 0x3FF00000 && dma_tx_desc <= 0x3FFFFFFF) {
+      volatile uint32_t* d = (volatile uint32_t*)dma_tx_desc;
+      Serial.printf("  TX_DESC @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
+                    dma_tx_desc, d[0], d[1], d[2], d[3], (int)(d[0] >> 31));
     }
     // Dump all TX descriptors once (only on first poll)
     static bool tx_ring_dumped = false;
