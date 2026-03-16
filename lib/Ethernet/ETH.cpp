@@ -28,6 +28,9 @@
 #include "esp_eth.h"
 #include "esp_eth_mac.h"
 #include "esp_eth_com.h"
+#if CONFIG_ETH_USE_ESP32_EMAC
+#include "esp_eth_mac_esp.h"
+#endif
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #if CONFIG_ETH_USE_ESP32_EMAC
@@ -409,13 +412,6 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
     REG_WRITE(0x3FF69808, 0x01);       // ext_en=1, int_en=0, all others=0
     REG_SET_BIT(0x3FF69804, BIT(24));  // clk_sel=1
   }
-  // The IDF enables alt_desc (32-byte enhanced descriptors) and sets TTSE
-  // (bit30) in every TX descriptor, causing DMA TX_STATE=6 (timestamp write)
-  // for every frame. In chained descriptor mode, alt_desc only affects whether
-  // the DMA writes back TDES4-TDES7 (timestamp words). With alt_desc=0, TTSE
-  // is ignored and the DMA uses 4-word descriptors — chaining still works via
-  // DES3 next-pointer. Clear alt_desc here so the DMA never enters TX_STATE=6.
-  REG_CLR_BIT(0x3FF69000, BIT(7));  // alt_desc_size=0
 #endif
 
   ret = esp_eth_start(_eth_handle);
@@ -423,6 +419,17 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
     log_e("esp_eth_start failed: %d", ret);
     return false;
   }
+
+#if CONFIG_IDF_TARGET_ESP32 && CONFIG_ETH_USE_ESP32_EMAC
+  // IDF sets TTSE (bit30 of TDES0) in every TX descriptor to enable IEEE-1588
+  // timestamping, causing DMA TX_STATE=6 (timestamp write) for every frame and
+  // stalling TX. Use the MAC ioctl to clear TTSE from the DMA's descriptor
+  // template so it is never set in future TX descriptors.
+  {
+    uint32_t ttse_mask = BIT(30);
+    esp_eth_ioctl(_eth_handle, (esp_eth_io_cmd_t)ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS, &ttse_mask);
+  }
+#endif
 
   _eth_started = true;
 

@@ -30,37 +30,6 @@
 
 static bool eth_connected = false;
 
-// The IDF's emac_esp32_transmit() sets TTSE (bit30) in every TX descriptor DES0,
-// asking the DMA to write a timestamp to TDES6/TDES7. This sends the DMA into
-// TX_STATE=6 "writing timestamp" for every frame. Since TSENA (MAC_TS_CTRL bit0)
-// is 0, the MAC provides timestamp=0, but the DMA still stalls on the write.
-// This task runs on core 0 alongside the Ethernet driver, sweeping TTSE from
-// all OWN=0 (CPU-owned, not yet handed to DMA) descriptors at high frequency.
-// When a descriptor has OWN=1 (DMA-owned), we can't clear it here — the DMA
-// ignores our write. The task also kicks TX poll demand if TX_STATE=6 is stuck.
-static void ttse_clear_task(void* arg) {
-  while (true) {
-    uint32_t tx_base = REG_READ(0x3FF69010);
-    if (tx_base >= 0x3FF00000 && tx_base <= 0x3FFFFFFF) {
-      uint32_t addr = tx_base;
-      for (int i = 0; i < 16; i++) {
-        volatile uint32_t* d = (volatile uint32_t*)addr;
-        // Clear TTSE regardless of OWN — if DMA already fetched it, no harm
-        if (d[0] & BIT(30)) d[0] &= ~BIT(30);
-        uint32_t next = d[3];
-        if (next == tx_base || next < 0x3FF00000 || next > 0x3FFFFFFF) break;
-        addr = next;
-      }
-    }
-    // Kick DMA if stuck in TX_STATE=6
-    uint32_t dma_st = REG_READ(0x3FF69014);
-    if (((dma_st >> 20) & 7) == 6) {
-      REG_WRITE(0x3FF69004, 1);
-    }
-    vTaskDelay(1);  // 1ms
-  }
-}
-
 void onEvent(arduino_event_id_t event) {
   switch (event) {
     case ARDUINO_EVENT_ETH_START: {
@@ -73,24 +42,14 @@ void onEvent(arduino_event_id_t event) {
       PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-      // mii_clk_tx_en (bit3) + mii_clk_rx_en (bit4) must be set for the 50MHz
-      // REF_CLK to reach the RMII TX/RX clock domains. IDF v5
-      // emac_ll_clock_enable_rmii_input() only sets ext_en (bit0).
-      // Apply here (ETH_START) so it's in place before DHCP queues any TX.
       // For RMII external clock input: only ext_en (bit0) must be set.
-      // int_en (bit1) is for internal clock generation and must be 0 —
-      // setting both ext_en+int_en may disable the external clock path.
+      // int_en (bit1) is for internal clock generation and must be 0.
       REG_WRITE(0x3FF69808, 0x01);  // ext_en=1, int_en=0
-      // ex_oscclk_conf.clk_sel (bit24 of 0x3FF69804) must be 1 to route the
-      // external GPIO0 clock through the RMII clock mux.
-      // bit24: after 4×6-bit div fields (div_num_10m, h_div_num_10m,
-      //        div_num_100m, h_div_num_100m) = 24 bits total.
+      // ex_oscclk_conf.clk_sel (bit24) must be 1 for external GPIO0 clock.
       REG_SET_BIT(0x3FF69804, BIT(24));
       Serial.printf("ETH: Started (IOMUX MCU_SEL=%d need 5, clk_ctrl=0x%08x oscclk=0x%08x)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
                     REG_READ(0x3FF69808), REG_READ(0x3FF69804));
-      // Check GPIO18 (MDIO) and GPIO23 (MDC) IOMUX state: MCU_SEL=2 = GPIO matrix
-      // RMII TX pins must be MCU_SEL=5 (EMAC IOMUX), not 2 (GPIO matrix)
       Serial.printf("ETH: GPIO19(TXD0) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
                     REG_READ(IO_MUX_GPIO19_REG),
                     (int)REG_GET_FIELD(IO_MUX_GPIO19_REG, MCU_SEL));
@@ -116,12 +75,8 @@ void onEvent(arduino_event_id_t event) {
                     REG_READ(IO_MUX_GPIO23_REG),
                     (int)REG_GET_FIELD(IO_MUX_GPIO23_REG, MCU_SEL));
       // Raw MDIO read of PHY addr=1, regs 2+3 (PHY ID1+ID2) via EMAC MAC registers.
-      // MAC block at 0x3FF6A000; emacgmiiaddr=+0x10, emacmiidata=+0x14
-      // bit0=miibusy, bit1=miiwrite, bits[5:2]=CR, bits[10:6]=miireg, bits[15:11]=miidev
-      // CR=0 → div42 for 80MHz APB → ~1.9MHz MDIO
       #define EMAC_GMIIADDR 0x3FF6A010
       #define EMAC_GMIIDATA 0x3FF6A014
-      // read: miiwrite=0, miibusy=1
       REG_WRITE(EMAC_GMIIADDR, (1<<11)|(2<<6)|(0<<2)|(0<<1)|(1<<0)); // PHY=1,reg=2,CR=0,read,busy
       uint32_t t = millis();
       while ((REG_READ(EMAC_GMIIADDR) & 0x1) && (millis()-t < 10)) {}
@@ -146,7 +101,6 @@ void onEvent(arduino_event_id_t event) {
                     (int)((mac_cr >> 11) & 1),
                     (int)((mac_cr >> 14) & 1),
                     REG_READ(0x3FF6A018));
-      // PHY BMSR (reg1) and BMCR (reg0) via MDIO
       #ifndef EMAC_GMIIADDR
       #define EMAC_GMIIADDR 0x3FF6A010
       #define EMAC_GMIIDATA 0x3FF6A014
@@ -158,13 +112,12 @@ void onEvent(arduino_event_id_t event) {
       };
       uint16_t bmcr  = mdio_rd(0);
       uint16_t bmsr  = mdio_rd(1);
-      uint16_t anar  = mdio_rd(4);   // AN advertise
-      uint16_t anlpar= mdio_rd(5);   // AN link partner
+      uint16_t anar  = mdio_rd(4);
+      uint16_t anlpar= mdio_rd(5);
       uint16_t pscsr = mdio_rd(31);  // Special Control/Status (LAN8720 reg31)
       Serial.printf("ETH: PHY BMSR=0x%04x (link=%d aneg=%d)  BMCR=0x%04x\n",
                     bmsr, (int)((bmsr>>2)&1), (int)((bmsr>>5)&1), bmcr);
       Serial.printf("ETH: PHY ANAR=0x%04x  ANLPAR=0x%04x\n", anar, anlpar);
-      // PSCSR bits[4:2]: 001=10H,010=10F,101=100H,110=100F
       Serial.printf("ETH: PHY PSCSR(31)=0x%04x  speed_ind=%d\n",
                     pscsr, (pscsr>>2)&7);
       break;
@@ -205,8 +158,6 @@ void setup() {
   // Pre-apply GPIO0 IOMUX so the clock is present from the start.
   // lib/Ethernet/ETH.cpp re-applies it after perimanClearPinBus() resets it.
   esp_gpio_revoke(BIT64(GPIO_NUM_0));
-  // FUNC_GPIO0_EMAC_TX_CLK=5 is the correct IOMUX function for RMII REF_CLK input.
-  // (Despite the confusing name, this is the input path — confirmed from IDF source.)
   REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
   PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
@@ -221,7 +172,6 @@ void setup() {
   Serial.println("ETH: PHY reset done");
 #else
   // Internal clock mode: IDF drives GPIO17 as clock output.
-  // No oscillator enable needed; PHY self-resets on power-up.
   Serial.println("ETH: using internal clock on GPIO17");
 #endif
 
@@ -231,13 +181,8 @@ void setup() {
                 esp_get_free_heap_size(),
                 heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
 
-  // EMAC_EXT base=0x3FF69800: +0x00=ex_clkout_conf, +0x04=ex_oscclk_conf,
-  //   +0x08=ex_clk_ctrl (bit0=ext_en, bit1=int_en), +0x0C=ex_phyinf_conf
   Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (before begin)\n",
                 REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
-
-  // Start TTSE clearing task before ETH.begin() so it's ready immediately
-  xTaskCreatePinnedToCore(ttse_clear_task, "ttse", 2048, NULL, 10, NULL, 0);
 
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
@@ -245,8 +190,6 @@ void setup() {
 
   Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
                 REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
-  // DPORT_WIFI_CLK_EN bit14=EMAC, EMAC_EX PHYINF bit5=RMII
-  // EMAC_DMA_BUS_MODE=0x3FF69000, EMAC_DMA_OP_MODE=0x3FF69018
   Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (after begin)\n",
                 REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
   Serial.printf("ETH: DMA BUS_MODE=0x%08x (alt_desc=%d)  OP_MODE=0x%08x  STATUS=0x%08x\n",
@@ -256,65 +199,13 @@ void setup() {
                 REG_READ(0x3FF6A000),
                 (int)((REG_READ(0x3FF6A000)>>3)&1),
                 (int)((REG_READ(0x3FF6A000)>>2)&1));
-
-  // DMA TX_STATE=6 = "writing timestamp" — the IDF enables IEEE 1588 timestamping
-  // (MAC_TS_CTRL bit0) and alt_desc (DMA BUS_MODE bit7, 32-byte enhanced descriptors
-  // with TDES4/TDES5). lwIP allocates standard 4-word descriptors, so the DMA
-  // tries to write timestamps to non-existent TDES4/TDES5 and hangs permanently.
-  // Fix: stop DMA TX/RX, clear alt_desc + timestamp, restart DMA.
-  {
-    uint32_t ts_ctrl = REG_READ(0x3FF6A700);
-    uint32_t bus_mode = REG_READ(0x3FF69000);
-    Serial.printf("ETH: before ts fix: MAC_TS_CTRL=0x%08x  DMA_BUS_MODE=0x%08x (alt_desc=%d)\n",
-                  ts_ctrl, bus_mode, (int)((bus_mode>>7)&1));
-    // Stop DMA TX and RX (clear ST bit13 and SR bit1 of OP_MODE)
-    uint32_t op = REG_READ(0x3FF69018);
-    REG_WRITE(0x3FF69018, op & ~((1<<13)|(1<<1)));
-    // Wait for DMA to reach stopped state
-    uint32_t t0 = millis();
-    while ((REG_READ(0x3FF69014) & 0x00600000) && (millis()-t0 < 50)) {}
-    // Flush TX FIFO
-    REG_SET_BIT(0x3FF69018, (1<<20));
-    t0 = millis();
-    while ((REG_READ(0x3FF69018) & (1<<20)) && (millis()-t0 < 50)) {}
-    // Do NOT clear alt_desc — the descriptor ring was allocated with 32-byte
-    // (8-word) spacing to match alt_desc=1.  Changing it here would misalign
-    // the DMA's view of the ring.
-    //
-    // The real problem: TX[0..1] DES0 has bit30 (TTSE) set, asking the DMA to
-    // write a timestamp to TDES6/TDES7. lwIP only allocates words 0-3 (16 bytes),
-    // so TDES6/TDES7 live in adjacent heap memory — the DMA corrupts heap and
-    // then stays in TX_STATE=6 forever.
-    // Fix: clear TTSE (bit30) from every TX descriptor that has OWN=1.
-    {
-      uint32_t tx_base = REG_READ(0x3FF69010);
-      if (tx_base >= 0x3FF00000 && tx_base <= 0x3FFFFFFF) {
-        uint32_t d_addr = tx_base;
-        for (int i = 0; i < 32; i++) {
-          volatile uint32_t* d = (volatile uint32_t*)d_addr;
-          if (d[0] & BIT(30)) {
-            d[0] &= ~BIT(30);  // clear TTSE
-          }
-          uint32_t next = d[3];
-          if (next == tx_base) break;
-          if (next < 0x3FF00000 || next > 0x3FFFFFFF) break;
-          d_addr = next;
-        }
-      }
-    }
-    // Restart DMA TX and RX
-    REG_WRITE(0x3FF69018, op | (1<<13)|(1<<1));
-    // Kick TX poll demand to unstick the DMA from TX_STATE=6
-    REG_WRITE(0x3FF69004, 1);
-    Serial.printf("ETH: after ts fix: MAC_TS_CTRL=0x%08x  DMA_BUS_MODE=0x%08x (alt_desc=%d)  DMA_STATUS=0x%08x\n",
-                  REG_READ(0x3FF6A700), REG_READ(0x3FF69000), (int)((REG_READ(0x3FF69000)>>7)&1),
-                  REG_READ(0x3FF69014));
-  }
+  // ETH.cpp calls ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS after esp_eth_start(),
+  // which clears TTSE (bit30) from the DMA's TDES0 template. Verify here.
+  Serial.printf("ETH: DMA TX_STATE=%d (should not be 6 after TTSE fix)\n",
+                (int)((REG_READ(0x3FF69014) >> 20) & 7));
 }
 
 void loop() {
-  // Watchdog: hard-reset via esp_restart() rather than ETH.end()/ETH.begin()
-  // to avoid leaking the EMAC interrupt on repeated restarts.
   if (millis() > 20000 && !ETH.linkUp()) {
     Serial.println("ETH: no link after 20s — hard reset");
     delay(100);
@@ -338,47 +229,30 @@ void loop() {
     uint32_t dma_tx_buf  = REG_READ(0x3FF69050);  // dmatxcurraddr_buf
     uint32_t dma_rx_list = REG_READ(0x3FF6900C);
     uint32_t dma_rx_desc = REG_READ(0x3FF6904C);  // dmarxcurrdesc
-    // MAC base 0x3FF6A000: +0=maccr, +0x24=emacdebug
     uint32_t mac_cr    = REG_READ(0x3FF6A000);
     uint32_t mac_debug = REG_READ(0x3FF6A024);  // emacdebug
     uint32_t mac_intr  = REG_READ(0x3FF6A038);  // MAC interrupt status
-    // EMAC_EX: clkout_conf=+0, oscclk_conf=+4, clk_ctrl=+8, phyinf=+C
-    // clk_ctrl bits: ext_en(0) int_en(1) rx_125_clk_en(2) mii_clk_tx_en(3) mii_clk_rx_en(4) clk_en(5)
-    // phyinf bits[15:13]=phy_intf_sel (need 4=RMII), oscclk bit24=clk_sel (need 1 for ext clock)
     uint32_t phyinf_val = REG_READ(0x3FF6980C);
     uint32_t oscclk_val = REG_READ(0x3FF69804);
     Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x (clk_sel=%d)  clk_ctrl=0x%08x  phyinf=0x%08x (intf=%d need 4)\n",
                   REG_READ(0x3FF69800), oscclk_val, (int)((oscclk_val>>24)&1),
                   REG_READ(0x3FF69808), phyinf_val, (int)((phyinf_val>>13)&7));
-    // MMC control at 0x3FF6A100: bit0=reset, bit1=stop_rollover, bit2=reset_on_read, bit3=freeze
-    // Standard GMAC MMC TX counter layout (base 0x3FF6A100):
-    //   +0x14=tx_octetcount_gb  +0x18=tx_framecount_gb  +0x64=tx_octetcount_g  +0x68=tx_framecount_g
-    //   +0x20=tx_broadcastframe_g +0x24=tx_multicastframe_g +0x28=tx_64octets_gb
     Serial.printf("  MMC_CTRL=0x%08x\n", REG_READ(0x3FF6A100));
     Serial.printf("  MMC_TX: gb_frames=%08x gb_bytes=%08x g_bytes=%08x g_frames=%08x\n",
                   REG_READ(0x3FF6A118), REG_READ(0x3FF6A114),
                   REG_READ(0x3FF6A164), REG_READ(0x3FF6A168));
     Serial.printf("  MMC_TX: bcast_g=%08x mcast_g=%08x 64oct=%08x\n",
                   REG_READ(0x3FF6A120), REG_READ(0x3FF6A124), REG_READ(0x3FF6A128));
-    // Standard GMAC MMC RX counter layout (base 0x3FF6A100+0x80=0x3FF6A180):
-    //   +0x88=rx_framecount_gb +0x84=rx_octetcount_gb +0xD4=rx_broadcastframe_g
-    //   +0xC0=rx_crc_err +0xD8=rx_octetcount_g +0xDC=rx_framecount_g
     Serial.printf("  MMC_RX: gb_frames=%08x gb_bytes=%08x g_bytes=%08x g_frames=%08x crc=%08x\n",
                   REG_READ(0x3FF6A188), REG_READ(0x3FF6A184),
                   REG_READ(0x3FF6A1D8), REG_READ(0x3FF6A1DC), REG_READ(0x3FF6A1C0));
-    // emacdebug correct bit layout (from emac_mac_struct.h):
-    //   [0]=macrpes, [2:1]=macrffcs, [4]=mtlrfwcas, [6:5]=mtlrfrcs, [9:8]=mtlrffls
-    //   [16]=mactpes(TX proto eng), [18:17]=mactfcs(TX frame ctrl), [19]=mactp(TX pause)
-    //   [21:20]=mtltfrcs(TX FIFO rd ctrl: 0=idle,1=read,2=wait_status,3=flush)
-    //   [22]=mtltfwcs(TX FIFO wr ctrl active), [24]=mtltfnes(TX FIFO not empty), [25]=mtltsffs
     Serial.printf("  MAC_DEBUG=0x%08x (TX_proto=%d TX_fc=%d TX_fifo_rd=%d TX_fifo_ne=%d TX_fifo_wr=%d)\n",
                   mac_debug,
-                  (int)((mac_debug >> 16) & 1),   // mactpes: TX MAC protocol engine active
-                  (int)((mac_debug >> 17) & 3),   // mactfcs: TX frame ctrl state (0=idle,1=wait,2=pause,3=xfer)
-                  (int)((mac_debug >> 20) & 3),   // mtltfrcs: TX FIFO read ctrl state
-                  (int)((mac_debug >> 24) & 1),   // mtltfnes: TX FIFO not empty
-                  (int)((mac_debug >> 22) & 1));  // mtltfwcs: TX FIFO write ctrl active
-    // emaccstatus at MAC+0xD8: bits[1:0]=link_mode(0=HD,1=FD), bits[3:2]=link_speed(0=2.5M,1=25M,2=125M)
+                  (int)((mac_debug >> 16) & 1),
+                  (int)((mac_debug >> 17) & 3),
+                  (int)((mac_debug >> 20) & 3),
+                  (int)((mac_debug >> 24) & 1),
+                  (int)((mac_debug >> 22) & 1));
     Serial.printf("  MAC_STATUS=0x%08x (speed=%d need 1, duplex=%d need 1)\n",
                   REG_READ(0x3FF6A0D8),
                   (int)((REG_READ(0x3FF6A0D8)>>1)&3),
@@ -392,66 +266,32 @@ void loop() {
                   dma_status, dma_rx_list, dma_rx_desc);
     Serial.printf("  DMA MISSED_FRAMES=0x%08x  CUR_HOST_TX=0x%08x  CUR_HOST_RX=0x%08x\n",
                   REG_READ(0x3FF69020), REG_READ(0x3FF69054), REG_READ(0x3FF69058));
-    // DMA op_mode bits: bit1=SR(rx_run), bit13=ST(tx_run), bit20=flush_tx_fifo, bit21=tx_store_fwd
     Serial.printf("  MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)  OP flush=%d sfwd=%d ST=%d SR=%d\n",
                   mac_cr,
-                  (int)((mac_cr >> 3) & 1),       // tx enable
-                  (int)((mac_cr >> 2) & 1),       // rx enable
-                  (int)((mac_cr >> 11) & 1),      // duplex
-                  (int)((mac_cr >> 14) & 1),      // fast eth speed
-                  (int)((dma_op_mode >> 20) & 1), // flush_tx_fifo
-                  (int)((dma_op_mode >> 21) & 1), // tx_store_forward
-                  (int)((dma_op_mode >> 13) & 1), // ST: DMA TX run
-                  (int)((dma_op_mode >>  1) & 1));// SR: DMA RX run
-    // The IDF sets TTSE (bit30) in each TX descriptor DES0, requesting a
-    // timestamp write to TDES6/TDES7. lwIP 8-word descriptors have words 4-7
-    // as part of the 32-byte alt_desc layout but the IDF driver only initialises
-    // words 0-3; TDES6/TDES7 overlap the next descriptor's words 2-3 (DES2/DES3).
-    // Clear TTSE from every descriptor that still has OWN=1 (not yet sent),
-    // then kick the DMA if TX_STATE=6 (stuck writing timestamp).
-    {
-      uint32_t tx_base2 = REG_READ(0x3FF69010);
-      if (tx_base2 >= 0x3FF00000 && tx_base2 <= 0x3FFFFFFF) {
-        uint32_t d_addr2 = tx_base2;
-        for (int i = 0; i < 32; i++) {
-          volatile uint32_t* d2 = (volatile uint32_t*)d_addr2;
-          if (d2[0] & BIT(30)) d2[0] &= ~BIT(30);  // clear TTSE
-          uint32_t next2 = d2[3];  // chained: next pointer at word 3 (TDES3)
-          if (next2 == tx_base2) break;
-          if (next2 < 0x3FF00000 || next2 > 0x3FFFFFFF) break;
-          d_addr2 = next2;
-        }
-      }
-    }
-    int tx_state = (dma_status >> 20) & 0x7;
-    if (tx_state == 6) {
-      Serial.printf("  TX_STATE=6: clearing TTSE and kicking DMA\n");
-      REG_WRITE(0x3FF69004, 1);  // dmatxpolldemand
-    }
-    Serial.printf("  DPORT: WIFI_CLK_EN=0x%08x  CORE_RST=0x%08x\n",
-                  DPORT_READ_PERI_REG(0x3FF000CC), DPORT_READ_PERI_REG(0x3FF0D0D0));
-    // MAC Timestamp control at 0x3FF6A700: bit0=ts_enable, bit8=ts_all_frames
-    // If bit0=1 the DMA writes timestamps to TDES4/TDES5 (words 4+5 of each TX descriptor).
-    // Standard 4-word descriptors don't have these words — DMA corrupts adjacent memory.
+                  (int)((mac_cr >> 3) & 1),
+                  (int)((mac_cr >> 2) & 1),
+                  (int)((mac_cr >> 11) & 1),
+                  (int)((mac_cr >> 14) & 1),
+                  (int)((dma_op_mode >> 20) & 1),
+                  (int)((dma_op_mode >> 21) & 1),
+                  (int)((dma_op_mode >> 13) & 1),
+                  (int)((dma_op_mode >>  1) & 1));
     Serial.printf("  MAC_TS_CTRL=0x%08x  (bit0=ts_en bit8=all_frames)\n",
                   REG_READ(0x3FF6A700));
-
     if (dma_tx_desc >= 0x3FF00000 && dma_tx_desc <= 0x3FFFFFFF) {
       volatile uint32_t* d = (volatile uint32_t*)dma_tx_desc;
-      Serial.printf("  TX_DESC @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d\n",
-                    dma_tx_desc, d[0], d[1], d[2], d[3], (int)(d[0] >> 31));
+      Serial.printf("  TX_DESC @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d TTSE=%d\n",
+                    dma_tx_desc, d[0], d[1], d[2], d[3],
+                    (int)(d[0] >> 31), (int)((d[0] >> 30) & 1));
     }
-    // Check TX[0] for TDES4/TDES5 (timestamp words — written by DMA if timestamping enabled)
     if (dma_tx_list >= 0x3FF00000 && dma_tx_list <= 0x3FFFFFFF) {
       volatile uint32_t* d = (volatile uint32_t*)dma_tx_list;
       Serial.printf("  TX[0] DES0..5: %08x %08x %08x %08x | %08x %08x\n",
                     d[0], d[1], d[2], d[3], d[4], d[5]);
     }
-    // Dump all TX descriptors once (only on first poll)
     static bool tx_ring_dumped = false;
     if (!tx_ring_dumped && dma_tx_list >= 0x3FF00000 && dma_tx_list <= 0x3FFFFFFF) {
       tx_ring_dumped = true;
-      // Dump first 32 bytes of TX[0] buffer (should be Ethernet frame: dst MAC, src MAC, ethertype...)
       volatile uint32_t* tx0d = (volatile uint32_t*)dma_tx_list;
       uint32_t tx0_buf = tx0d[2];
       if (tx0_buf >= 0x3FF00000 && tx0_buf <= 0x3FFFFFFF) {
@@ -465,13 +305,12 @@ void loop() {
       for (int i = 0; i < 32; i++) {
         if (desc < 0x3FF00000 || desc > 0x3FFFFFFF) break;
         volatile uint32_t* d = (volatile uint32_t*)desc;
-        Serial.printf("    TX[%2d] @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x\n",
-                      i, desc, d[0], d[1], d[2], d[3]);
+        Serial.printf("    TX[%2d] @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x  TTSE=%d\n",
+                      i, desc, d[0], d[1], d[2], d[3], (int)((d[0]>>30)&1));
         if (d[3] == dma_tx_list) { Serial.println("    (ring end)"); break; }
         desc = d[3];
       }
     }
-    // Dump all RX descriptors once (only on first poll)
     static bool rx_ring_dumped = false;
     if (!rx_ring_dumped && dma_rx_list >= 0x3FF00000 && dma_rx_list <= 0x3FFFFFFF) {
       rx_ring_dumped = true;
@@ -486,7 +325,6 @@ void loop() {
         desc = d[3];
       }
     }
-    // Dump lwIP netif list + DHCP state
     for (struct netif* nif = netif_list; nif != NULL; nif = nif->next) {
       Serial.printf("  netif %c%c%d  flags=0x%02x  ip=%s\n",
                     nif->name[0], nif->name[1], nif->num,
