@@ -253,6 +253,12 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
     PIN_INPUT_ENABLE(PERIPHS_IO_MUX_GPIO0_U);
     CLEAR_PERI_REG_MASK(PERIPHS_IO_MUX_GPIO0_U, FUN_PD);
     CLEAR_PERI_REG_MASK(PERIPHS_IO_MUX_GPIO0_U, FUN_PU);
+    // Also pre-set ex_oscclk_conf.clk_sel=1 so the external clock path is
+    // selected before the EMAC bus clock is enabled and the DMA reset runs.
+    // emac_ll_clock_enable_rmii_input() sets this bit, but it is observed to
+    // read back as 0 after init, causing the MAC TX FIFO to not drain.
+    // EMAC_EX base=0x3FF69800; ex_oscclk_conf=+0x04, clk_sel=bit20.
+    REG_SET_BIT(0x3FF69804, BIT(20));
   }
 #endif /* CONFIG_IDF_TARGET_ESP32 */
   if (!perimanClearPinBus(_pin_mcd)) {
