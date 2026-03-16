@@ -44,7 +44,7 @@ void onEvent(arduino_event_id_t event) {
       // REF_CLK to reach the RMII TX/RX clock domains. IDF v5
       // emac_ll_clock_enable_rmii_input() only sets ext_en (bit0).
       // Apply here (ETH_START) so it's in place before DHCP queues any TX.
-      REG_WRITE(0x3FF69808, REG_READ(0x3FF69808) | (1<<3) | (1<<4));
+      REG_WRITE(0x3FF69808, REG_READ(0x3FF69808) | (1<<3) | (1<<4) | (1<<5));
       Serial.printf("ETH: Started (IOMUX MCU_SEL=%d need 5, clk_ctrl=0x%08x)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
                     REG_READ(0x3FF69808));

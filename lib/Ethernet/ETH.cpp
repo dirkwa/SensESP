@@ -399,7 +399,8 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
   // domains. Without them the MAC TX FIFO read controller never starts and
   // no frames leave the board. Apply before esp_eth_start() so it is in
   // place before the first frame is queued.
-  REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4));
+  // Also set clk_en (bit5) which gates the main EMAC clock path.
+  REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4) | BIT(5));
 #endif
 
   ret = esp_eth_start(_eth_handle);
