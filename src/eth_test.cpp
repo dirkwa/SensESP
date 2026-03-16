@@ -15,6 +15,8 @@
 
 #include <ETH.h>
 #include <WiFi.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_private/esp_gpio_reserve.h"
 #include "soc/io_mux_reg.h"
 #include "soc/gpio_reg.h"
@@ -27,6 +29,37 @@
 #define PHY_RST_PIN 17  // only used when ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
 
 static bool eth_connected = false;
+
+// The IDF's emac_esp32_transmit() sets TTSE (bit30) in every TX descriptor DES0,
+// asking the DMA to write a timestamp to TDES6/TDES7. This sends the DMA into
+// TX_STATE=6 "writing timestamp" for every frame. Since TSENA (MAC_TS_CTRL bit0)
+// is 0, the MAC provides timestamp=0, but the DMA still stalls on the write.
+// This task runs on core 0 alongside the Ethernet driver, sweeping TTSE from
+// all OWN=0 (CPU-owned, not yet handed to DMA) descriptors at high frequency.
+// When a descriptor has OWN=1 (DMA-owned), we can't clear it here — the DMA
+// ignores our write. The task also kicks TX poll demand if TX_STATE=6 is stuck.
+static void ttse_clear_task(void* arg) {
+  while (true) {
+    uint32_t tx_base = REG_READ(0x3FF69010);
+    if (tx_base >= 0x3FF00000 && tx_base <= 0x3FFFFFFF) {
+      uint32_t addr = tx_base;
+      for (int i = 0; i < 16; i++) {
+        volatile uint32_t* d = (volatile uint32_t*)addr;
+        // Clear TTSE regardless of OWN — if DMA already fetched it, no harm
+        if (d[0] & BIT(30)) d[0] &= ~BIT(30);
+        uint32_t next = d[3];
+        if (next == tx_base || next < 0x3FF00000 || next > 0x3FFFFFFF) break;
+        addr = next;
+      }
+    }
+    // Kick DMA if stuck in TX_STATE=6
+    uint32_t dma_st = REG_READ(0x3FF69014);
+    if (((dma_st >> 20) & 7) == 6) {
+      REG_WRITE(0x3FF69004, 1);
+    }
+    vTaskDelay(1);  // 1ms
+  }
+}
 
 void onEvent(arduino_event_id_t event) {
   switch (event) {
@@ -202,6 +235,9 @@ void setup() {
   //   +0x08=ex_clk_ctrl (bit0=ext_en, bit1=int_en), +0x0C=ex_phyinf_conf
   Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (before begin)\n",
                 REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
+
+  // Start TTSE clearing task before ETH.begin() so it's ready immediately
+  xTaskCreatePinnedToCore(ttse_clear_task, "ttse", 2048, NULL, 10, NULL, 0);
 
   Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
