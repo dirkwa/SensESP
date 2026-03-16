@@ -43,6 +43,22 @@ void onEvent(arduino_event_id_t event) {
       Serial.printf("ETH: Started (IOMUX confirmed, MCU_SEL=%d)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
       // Check GPIO18 (MDIO) and GPIO23 (MDC) IOMUX state: MCU_SEL=2 = GPIO matrix
+      // RMII TX pins must be MCU_SEL=5 (EMAC IOMUX), not 2 (GPIO matrix)
+      Serial.printf("ETH: GPIO19(TXD0) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
+                    REG_READ(IO_MUX_GPIO19_REG),
+                    (int)REG_GET_FIELD(IO_MUX_GPIO19_REG, MCU_SEL));
+      Serial.printf("ETH: GPIO21(TX_EN)IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
+                    REG_READ(IO_MUX_GPIO21_REG),
+                    (int)REG_GET_FIELD(IO_MUX_GPIO21_REG, MCU_SEL));
+      Serial.printf("ETH: GPIO22(TXD1) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
+                    REG_READ(IO_MUX_GPIO22_REG),
+                    (int)REG_GET_FIELD(IO_MUX_GPIO22_REG, MCU_SEL));
+      Serial.printf("ETH: GPIO25(RXD0) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
+                    REG_READ(IO_MUX_GPIO25_REG),
+                    (int)REG_GET_FIELD(IO_MUX_GPIO25_REG, MCU_SEL));
+      Serial.printf("ETH: GPIO27(RXDV) IOMUX=0x%08x MCU_SEL=%d (need 5)\n",
+                    REG_READ(IO_MUX_GPIO27_REG),
+                    (int)REG_GET_FIELD(IO_MUX_GPIO27_REG, MCU_SEL));
       Serial.printf("ETH: GPIO18(MDIO) IOMUX=0x%08x MCU_SEL=%d\n",
                     REG_READ(IO_MUX_GPIO18_REG),
                     (int)REG_GET_FIELD(IO_MUX_GPIO18_REG, MCU_SEL));
