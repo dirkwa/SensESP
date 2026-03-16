@@ -314,6 +314,11 @@ void loop() {
                   (int)((mac_debug >> 20) & 3),   // mtltfrcs: TX FIFO read ctrl state
                   (int)((mac_debug >> 24) & 1),   // mtltfnes: TX FIFO not empty
                   (int)((mac_debug >> 22) & 1));  // mtltfwcs: TX FIFO write ctrl active
+    // emaccstatus at MAC+0xD8: bits[1:0]=link_mode(0=HD,1=FD), bits[3:2]=link_speed(0=2.5M,1=25M,2=125M)
+    Serial.printf("  MAC_STATUS=0x%08x (speed=%d need 1, duplex=%d need 1)\n",
+                  REG_READ(0x3FF6A0D8),
+                  (int)((REG_READ(0x3FF6A0D8)>>1)&3),
+                  (int)(REG_READ(0x3FF6A0D8)&1));
     Serial.printf("  MAC_INTR=0x%08x  DMA_INTR_EN=0x%08x\n", mac_intr, REG_READ(0x3FF6901C));
     Serial.printf("  DMA TX_STATE=%d  OP_MODE=0x%08x  TX_LIST=0x%08x  TX_DESC=0x%08x  TX_BUF=0x%08x\n",
                   (int)((dma_status >> 20) & 0x7),
@@ -334,13 +339,19 @@ void loop() {
                   (int)((dma_op_mode >> 21) & 1), // tx_store_forward
                   (int)((dma_op_mode >> 13) & 1), // ST: DMA TX run
                   (int)((dma_op_mode >>  1) & 1));// SR: DMA RX run
-    // If MAC TX is not enabled, force-enable it and kick the DMA TX poll demand.
-    // This tells us whether MAC_CR TX=0 is the reason TX never fires.
-    if (!((mac_cr >> 3) & 1)) {
-      Serial.println("  *** MAC TX not enabled! Force-enabling MAC_CR bit3 + DMA TX poll demand ***");
-      REG_SET_BIT(0x3FF6A000, BIT(3));  // gmacconfig.tx = 1
-      REG_WRITE(0x3FF69004, 1);         // dmatxpolldemand = 1 (resume)
-      Serial.printf("  MAC_CR after fix=0x%08x\n", REG_READ(0x3FF6A000));
+    // If MAC TX FIFO has data but MAC TX frame controller is idle, the RMII TX
+    // clock may not be reaching the MTL TX FIFO read controller. Try toggling
+    // MAC TX off/on to force the MAC TX FSM to re-latch the clock.
+    static int tx_stuck_count = 0;
+    bool tx_fifo_ne = (mac_debug >> 24) & 1;
+    bool tx_fc_idle = !((mac_debug >> 17) & 3);
+    if (tx_fifo_ne && tx_fc_idle) {
+      tx_stuck_count++;
+      Serial.printf("  TX FIFO stuck (%d): toggling MAC_CR TX off/on + poll demand\n", tx_stuck_count);
+      REG_CLEAR_BIT(0x3FF6A000, BIT(3));  // disable MAC TX
+      asm volatile("nop; nop; nop; nop; nop; nop; nop; nop;");
+      REG_SET_BIT(0x3FF6A000, BIT(3));    // re-enable MAC TX
+      REG_WRITE(0x3FF69004, 1);           // dmatxpolldemand: kick DMA TX
     }
     Serial.printf("  DPORT: WIFI_CLK_EN=0x%08x  CORE_RST=0x%08x\n",
                   DPORT_READ_PERI_REG(0x3FF000CC), DPORT_READ_PERI_REG(0x3FF0D0D0));
