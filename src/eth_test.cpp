@@ -304,10 +304,20 @@ void loop() {
     static bool clk_fix_tried = false;
     if (!clk_fix_tried && ETH.linkUp() && REG_READ(0x3FF6A114) == 0) {
       clk_fix_tried = true;
-      uint32_t clk = REG_READ(0x3FF69808);
-      Serial.printf("  CLK_FIX: clk_ctrl was 0x%08x, setting mii_clk_tx_en (bit3)\n", clk);
-      REG_WRITE(0x3FF69808, clk | (1 << 3));
-      Serial.printf("  CLK_FIX: clk_ctrl now 0x%08x\n", REG_READ(0x3FF69808));
+      // Attempt 1: zero ex_clkout_conf (div_num=0, h_div_num=0, dly_num=0).
+      // In RMII output mode IDF sets this to 0; in ext_en mode it's left at 0x24.
+      // If this divider gates the internal MAC TX clock path, clearing it may fix TX.
+      uint32_t clkout_was = REG_READ(0x3FF69800);
+      REG_WRITE(0x3FF69800, 0x00000000);
+      Serial.printf("  CLK_FIX1: ex_clkout_conf 0x%08x -> 0x%08x\n", clkout_was, REG_READ(0x3FF69800));
+      // Attempt 2: also set mii_clk_tx_en (bit3) + mii_clk_rx_en (bit4) in clk_ctrl.
+      uint32_t clk_was = REG_READ(0x3FF69808);
+      REG_WRITE(0x3FF69808, clk_was | (1 << 3) | (1 << 4));
+      Serial.printf("  CLK_FIX2: ex_clk_ctrl 0x%08x -> 0x%08x\n", clk_was, REG_READ(0x3FF69808));
+      // Attempt 3: clear clk_sel in oscclk_conf (bit24) — try int oscillator path.
+      uint32_t osc_was = REG_READ(0x3FF69804);
+      REG_WRITE(0x3FF69804, osc_was & ~(1 << 24));
+      Serial.printf("  CLK_FIX3: ex_oscclk_conf 0x%08x -> 0x%08x\n", osc_was, REG_READ(0x3FF69804));
     }
 
     if (dma_tx_desc >= 0x3FF00000 && dma_tx_desc <= 0x3FFFFFFF) {
