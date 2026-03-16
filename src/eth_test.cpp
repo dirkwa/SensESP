@@ -278,18 +278,22 @@ void loop() {
     // EMAC_EX: clkout_conf=+0, oscclk_conf=+4, clk_ctrl=+8, phyinf=+C
     Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x  clk_ctrl=0x%08x\n",
                   REG_READ(0x3FF69800), REG_READ(0x3FF69804), REG_READ(0x3FF69808));
-    // MAC MMC TX counters (base 0x3FF6A100):
-    //   +0x08=tx_err  +0x0C=tx_single_col  +0x10=tx_multi_col  +0x14=tx_good_frames  +0x18=tx_good_bytes
-    //   +0x60=tx_carrier_err  +0x68=tx_underflow_err
-    // MAC MMC RX counters:
-    //   +0xD4=rx_good_frames  +0xD8=rx_good_bytes  +0xC0=rx_crc_err  +0xC4=rx_align_err  +0xD0=rx_ucast
-    Serial.printf("  MMC_TX: good=%08x bytes=%08x err=%08x scol=%08x mcol=%08x carrier=%08x uflow=%08x\n",
-                  REG_READ(0x3FF6A114), REG_READ(0x3FF6A118), REG_READ(0x3FF6A108),
-                  REG_READ(0x3FF6A10C), REG_READ(0x3FF6A110),
-                  REG_READ(0x3FF6A160), REG_READ(0x3FF6A168));
-    Serial.printf("  MMC_RX: good=%08x bytes=%08x crc_err=%08x align_err=%08x ucast=%08x\n",
-                  REG_READ(0x3FF6A1D4), REG_READ(0x3FF6A1D8), REG_READ(0x3FF6A1C0),
-                  REG_READ(0x3FF6A1C4), REG_READ(0x3FF6A1D0));
+    // MMC control at 0x3FF6A100: bit0=reset, bit1=stop_rollover, bit2=reset_on_read, bit3=freeze
+    // Standard GMAC MMC TX counter layout (base 0x3FF6A100):
+    //   +0x14=tx_octetcount_gb  +0x18=tx_framecount_gb  +0x64=tx_octetcount_g  +0x68=tx_framecount_g
+    //   +0x20=tx_broadcastframe_g +0x24=tx_multicastframe_g +0x28=tx_64octets_gb
+    Serial.printf("  MMC_CTRL=0x%08x\n", REG_READ(0x3FF6A100));
+    Serial.printf("  MMC_TX: gb_frames=%08x gb_bytes=%08x g_bytes=%08x g_frames=%08x\n",
+                  REG_READ(0x3FF6A118), REG_READ(0x3FF6A114),
+                  REG_READ(0x3FF6A164), REG_READ(0x3FF6A168));
+    Serial.printf("  MMC_TX: bcast_g=%08x mcast_g=%08x 64oct=%08x\n",
+                  REG_READ(0x3FF6A120), REG_READ(0x3FF6A124), REG_READ(0x3FF6A128));
+    // Standard GMAC MMC RX counter layout (base 0x3FF6A100+0x80=0x3FF6A180):
+    //   +0x88=rx_framecount_gb +0x84=rx_octetcount_gb +0xD4=rx_broadcastframe_g
+    //   +0xC0=rx_crc_err +0xD8=rx_octetcount_g +0xDC=rx_framecount_g
+    Serial.printf("  MMC_RX: gb_frames=%08x gb_bytes=%08x g_bytes=%08x g_frames=%08x crc=%08x\n",
+                  REG_READ(0x3FF6A188), REG_READ(0x3FF6A184),
+                  REG_READ(0x3FF6A1D8), REG_READ(0x3FF6A1DC), REG_READ(0x3FF6A1C0));
     // emacdebug bits: [1:0]=rxfifo_rd_ctrl, [4]=rxfifo_wr_ctrl, [8:5]=rx_smac_ctrl,
     //   [17:16]=tx_tfifo_rd_ctrl, [19:18]=tx_smac_ctrl, [20]=tx_fifo_full, [21]=tx_fifo_not_empty,
     //   [22]=rx_frame_in_fifo, [23]=rx_fifo_overflow, [24]=tx_pause_frame_req
