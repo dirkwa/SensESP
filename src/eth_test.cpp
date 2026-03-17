@@ -134,6 +134,27 @@ void onEvent(arduino_event_id_t event) {
       REG_SET_BIT(0x3FF69804, BIT(24));
       Serial.printf("ETH: after flush clk_ctrl=0x%08x oscclk=0x%08x\n",
                     REG_READ(0x3FF69808), REG_READ(0x3FF69804));
+      // Poll dmatxcurraddr_buf (0x3FF69050) rapidly for 2s to catch DMA reading TX buffer.
+      // If it ever differs from dmarxcurraddr_buf (0x3FF69054), DMA is reading TX data.
+      Serial.printf("ETH: polling TX_BUF for 2s (ST=%d SR=%d)\n",
+                    (int)((REG_READ(0x3FF69018) >> 13) & 1),
+                    (int)((REG_READ(0x3FF69018) >> 1) & 1));
+      {
+        uint32_t last_txbuf = 0, last_status = 0;
+        uint32_t t_poll = millis();
+        while (millis() - t_poll < 2000) {
+          uint32_t txbuf = REG_READ(0x3FF69050);
+          uint32_t status = REG_READ(0x3FF69014);
+          if (txbuf != last_txbuf || status != last_status) {
+            Serial.printf("  t+%lums  TX_BUF=0x%08x  STATUS=0x%08x  TX_STATE=%d\n",
+                          millis() - t_poll, txbuf, status, (int)((status >> 20) & 7));
+            last_txbuf = txbuf;
+            last_status = status;
+          }
+          delayMicroseconds(100);
+        }
+        Serial.printf("ETH: poll done  TX_BUF=0x%08x\n", REG_READ(0x3FF69050));
+      }
       break;
     }
     case ARDUINO_EVENT_ETH_GOT_IP:
@@ -276,10 +297,27 @@ void loop() {
                   (int)((dma_status >> 20) & 0x7),
                   dma_op_mode,
                   dma_tx_list, dma_tx_desc, dma_tx_buf);
-    Serial.printf("  DMA STATUS=0x%08x  RX_LIST=0x%08x  RX_DESC=0x%08x\n",
-                  dma_status, dma_rx_list, dma_rx_desc);
-    Serial.printf("  DMA MISSED_FRAMES=0x%08x  CUR_HOST_TX=0x%08x  CUR_HOST_RX=0x%08x\n",
-                  REG_READ(0x3FF69020), REG_READ(0x3FF69054), REG_READ(0x3FF69058));
+    Serial.printf("  DMA STATUS=0x%08x (TI=%d TPS=%d TBU=%d TU=%d TJT=%d UNF=%d RI=%d RBU=%d RPS=%d RWT=%d ETI=%d FBI=%d ERI=%d AIS=%d NIS=%d err=%d)\n",
+                  dma_status,
+                  (int)(dma_status & BIT(0)),           // TI  transmit interrupt
+                  (int)((dma_status >> 1) & 1),         // TPS transmit process stopped
+                  (int)((dma_status >> 2) & 1),         // TBU transmit buffer unavailable
+                  (int)((dma_status >> 3) & 1),         // TJT transmit jabber timeout
+                  (int)((dma_status >> 4) & 1),         // OVF receive overflow
+                  (int)((dma_status >> 5) & 1),         // UNF transmit underflow
+                  (int)((dma_status >> 6) & 1),         // RI  receive interrupt
+                  (int)((dma_status >> 7) & 1),         // RBU receive buffer unavailable
+                  (int)((dma_status >> 8) & 1),         // RPS receive process stopped
+                  (int)((dma_status >> 9) & 1),         // RWT receive watchdog timeout
+                  (int)((dma_status >> 10) & 1),        // ETI early transmit interrupt
+                  (int)((dma_status >> 13) & 1),        // FBI fatal bus error
+                  (int)((dma_status >> 14) & 1),        // ERI early receive interrupt
+                  (int)((dma_status >> 15) & 1),        // AIS abnormal interrupt summary
+                  (int)((dma_status >> 16) & 1),        // NIS normal interrupt summary
+                  (int)((dma_status >> 23) & 7));       // error bits [25:23]
+    Serial.printf("  DMA RX_LIST=0x%08x  RX_DESC=0x%08x\n", dma_rx_list, dma_rx_desc);
+    Serial.printf("  DMA MISSED_FRAMES=0x%08x  dmatxcurraddr=0x%08x  dmarxcurraddr=0x%08x\n",
+                  REG_READ(0x3FF69020), REG_READ(0x3FF69050), REG_READ(0x3FF69054));
     Serial.printf("  MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)  OP flush=%d sfwd=%d ST=%d SR=%d\n",
                   mac_cr,
                   (int)((mac_cr >> 3) & 1),
