@@ -166,11 +166,19 @@ void onEvent(arduino_event_id_t event) {
       REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4));  // mii_clk_tx_en=1, mii_clk_rx_en=1
       Serial.printf("ETH: ex_clk_ctrl after  mii_clk_en patch=0x%08x\n", REG_READ(0x3FF69808));
 
+      // MAC_TS_CTRL bit13=TSENALL was set by IDF (enable timestamp for all frames).
+      // With TTSE cleared from descriptors, the MAC may try to timestamp every
+      // frame anyway and stall — the MAC TX engine (tfc=3) was seen flushing
+      // frames without MMC_TX incrementing. Clear TSENALL to disable timestamps.
+      Serial.printf("ETH: MAC_TS_CTRL before=0x%08x\n", REG_READ(0x3FF6A700));
+      REG_WRITE(0x3FF6A700, 0x00000000);  // clear all timestamp control bits
+      Serial.printf("ETH: MAC_TS_CTRL after =0x%08x\n", REG_READ(0x3FF6A700));
+
       // MAC loopback test: briefly enable MII loopback (MAC_CR bit12) to test
-      // whether the MAC TX state machine activates at all. In loopback, TX data
-      // is fed directly back into RX without going to the RMII wire. If MMC_TX
-      // increments during loopback, the MAC TX engine works and the problem is
-      // the RMII output path. If MMC_TX stays zero, the MAC TX itself is broken.
+      // whether the MAC TX state machine can complete a frame. The MAC IS
+      // activating (tfc=3 seen in poll), but MMC_TX stays 0, suggesting frames
+      // are being flushed before completion. If this clears after MAC_TS_CTRL=0,
+      // timestamps were the culprit.
       {
         Serial.printf("ETH: loopback test -- MAC_CR before=0x%08x  MMC_TX before=%u\n",
                       REG_READ(0x3FF6A000), REG_READ(0x3FF6A118));
@@ -178,20 +186,24 @@ void onEvent(arduino_event_id_t event) {
         delayMicroseconds(200);
         REG_WRITE(0x3FF69004, 1);           // poll demand
         uint32_t t_lb = millis();
+        uint32_t dbg_peak = 0;
         while (REG_READ(0x3FF6A118) == 0 && (millis() - t_lb < 500)) {
+          uint32_t d = REG_READ(0x3FF6A024);
+          if (d) dbg_peak = d;
           delayMicroseconds(100);
         }
         uint32_t mmc_lb = REG_READ(0x3FF6A118);
         uint32_t dbg_lb = REG_READ(0x3FF6A024);
         REG_CLR_BIT(0x3FF6A000, BIT(12));  // LM=0: disable loopback
-        Serial.printf("ETH: loopback test done  MMC_TX=%u  MAC_DEBUG=0x%08x  (tpes=%d tfc=%d fifo_ne=%d)\n",
-                      mmc_lb, dbg_lb,
-                      (int)((dbg_lb >> 16) & 1),
-                      (int)((dbg_lb >> 17) & 3),
-                      (int)((dbg_lb >> 24) & 1));
+        Serial.printf("ETH: loopback done  MMC_TX=%u  MAC_DEBUG_peak=0x%08x  MAC_DEBUG_final=0x%08x\n",
+                      mmc_lb, dbg_peak, dbg_lb);
+        Serial.printf("ETH:   (tpes_peak=%d tfc_peak=%d fifo_ne_peak=%d)\n",
+                      (int)((dbg_peak >> 16) & 1),
+                      (int)((dbg_peak >> 17) & 3),
+                      (int)((dbg_peak >> 24) & 1));
         Serial.printf("ETH: %s\n", mmc_lb > 0
-          ? "LOOPBACK OK: MAC TX works, problem is RMII output path"
-          : "LOOPBACK FAIL: MAC TX engine not activating at all");
+          ? "LOOPBACK OK: MAC TX works"
+          : "LOOPBACK FAIL: MAC TX not completing frames");
       }
 
       // Poll MAC_DEBUG, TX_BUF and MMC_TX rapidly for 5s to catch MAC TX activity.
