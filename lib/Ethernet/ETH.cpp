@@ -409,7 +409,7 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
   // Also force clk_sel=1 (bit24 of ex_oscclk_conf) to select external clock.
   // Both applied before esp_eth_start().
   if (clock_mode == ETH_CLOCK_GPIO0_IN) {
-    REG_WRITE(0x3FF69808, 0x01);       // ext_en=1, int_en=0, all others=0
+    REG_WRITE(0x3FF69808, 0x21);       // ext_en=1, int_en=0, clk_en=1
     REG_SET_BIT(0x3FF69804, BIT(24));  // clk_sel=1
   }
 #endif

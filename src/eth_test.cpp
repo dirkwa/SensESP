@@ -42,9 +42,9 @@ void onEvent(arduino_event_id_t event) {
       PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-      // For RMII external clock input: only ext_en (bit0) must be set.
+      // For RMII external clock input: ext_en (bit0) + clk_en (bit5).
       // int_en (bit1) is for internal clock generation and must be 0.
-      REG_WRITE(0x3FF69808, 0x01);  // ext_en=1, int_en=0
+      REG_WRITE(0x3FF69808, 0x21);  // ext_en=1, int_en=0, clk_en=1
       // ex_oscclk_conf.clk_sel (bit24) must be 1 for external GPIO0 clock.
       REG_SET_BIT(0x3FF69804, BIT(24));
       Serial.printf("ETH: Started (IOMUX MCU_SEL=%d need 5, clk_ctrl=0x%08x oscclk=0x%08x)\n",
@@ -129,8 +129,8 @@ void onEvent(arduino_event_id_t event) {
       while ((REG_READ(0x3FF69018) & BIT(20)) && (millis() - t_flush < 10)) {}
       Serial.printf("ETH: OP_MODE after  flush=0x%08x  (FTF cleared=%d)\n",
                     REG_READ(0x3FF69018), (int)!(REG_READ(0x3FF69018) & BIT(20)));
-      // Re-apply clk_ctrl to make sure ext_en is still set after flush.
-      REG_WRITE(0x3FF69808, 0x01);
+      // Re-apply clk_ctrl to make sure ext_en and clk_en are set after flush.
+      REG_WRITE(0x3FF69808, 0x21);  // ext_en=1, clk_en=1
       REG_SET_BIT(0x3FF69804, BIT(24));
       Serial.printf("ETH: after flush clk_ctrl=0x%08x oscclk=0x%08x\n",
                     REG_READ(0x3FF69808), REG_READ(0x3FF69804));
