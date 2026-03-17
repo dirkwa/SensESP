@@ -81,6 +81,39 @@ static void onEthConnected(arduino_event_id_t event, arduino_event_info_t info) 
       log_e("Could not find ETH interface with that handle!");
       return;
     }
+#if CONFIG_IDF_TARGET_ESP32 && CONFIG_ETH_USE_ESP32_EMAC
+    // IDF's emac_esp_transmit() sets DC (bit20, Disable CRC) in every TX
+    // descriptor it builds. With DC=1 the MAC sends frames without FCS,
+    // the switch rejects them, and MMC_TX never increments.
+    // The ioctl at esp_eth_start() time only clears the TDES0 template;
+    // it cannot fix frames already queued. Walk the ring now (on link-up,
+    // after DHCP DISCOVERs have been enqueued) and clear DC from each one.
+    // Also stop+flush+restart the TX DMA so the MAC re-reads corrected descriptors.
+    {
+      const uint32_t bad_bits = BIT(25) | BIT(20);  // TTSE | DC
+      uint32_t base = REG_READ(0x3FF69010);          // dmatxbaseaddr
+      uint32_t desc_addr = base;
+      for (int i = 0; i < 32 && desc_addr >= 0x3FF00000 && desc_addr <= 0x3FFFFFFF; i++) {
+        volatile uint32_t* d = (volatile uint32_t*)desc_addr;
+        if (d[0] & bad_bits) d[0] &= ~bad_bits;
+        uint32_t next = d[3];
+        if (next == base) break;
+        desc_addr = next;
+      }
+      // Stop TX DMA, flush MTL TX FIFO (which may hold a DC=1 frame already
+      // fetched before we patched the descriptor), then restart.
+      if (((REG_READ(0x3FF69014) >> 20) & 7) != 0) {
+        REG_CLR_BIT(0x3FF69018, BIT(13));  // ST=0
+        uint32_t t = esp_timer_get_time();
+        while (((REG_READ(0x3FF69014) >> 20) & 7) != 0 && (esp_timer_get_time() - t) < 2000) {}
+        REG_SET_BIT(0x3FF69018, BIT(20));  // FTF: flush TX FIFO
+        t = esp_timer_get_time();
+        while ((REG_READ(0x3FF69018) & BIT(20)) && (esp_timer_get_time() - t) < 2000) {}
+        REG_SET_BIT(0x3FF69018, BIT(13));  // ST=1
+        REG_WRITE(0x3FF69004, 1);           // poll demand
+      }
+    }
+#endif
 #if CONFIG_LWIP_IPV6
     if (_ethernets[index]->getStatusBits() & ESP_NETIF_WANT_IP6_BIT) {
       esp_err_t err = esp_netif_create_ip6_linklocal(_ethernets[index]->netif());
