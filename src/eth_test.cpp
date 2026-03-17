@@ -125,82 +125,95 @@ void onEvent(arduino_event_id_t event) {
       REG_WRITE(0x3FF69808, 0x01);  // ext_en=1 only (IDF default)
       REG_SET_BIT(0x3FF69804, BIT(24));
 
-      // If DMA is in TX_STATE=6 (TTSE timestamp-write deadlock), unblock it by
-      // stopping and restarting the TX DMA. Clearing ST aborts state=6 and puts
-      // DMA into "stopped" state; re-setting ST makes it re-read from the head
-      // of the TX descriptor ring. We also flush the TX FIFO (FTF) while ST=0
-      // to drain any stale frame data.
+      // Step 1: Clear MAC_TS_CTRL BEFORE touching the DMA or MAC TX.
+      // IDF sets TSENALL (bit13) which arms the PTP timestamp capture for every
+      // frame. With TSENA (bit0)=0 the PTP clock is ungated but uninitialized.
+      // Gemini confirmed: the MAC waits for a Timestamp Snapshot Acknowledge
+      // before signalling frame completion to MMC — so MMC_TX never increments
+      // and tfc reaches 3 ("writing status") then silently aborts.
+      // Clear ALL timestamp bits now, before the DMA restart, so no queued frame
+      // ever hits the PTP ack path.
+      Serial.printf("ETH: MAC_TS_CTRL before=0x%08x  FLOW=0x%08x\n",
+                    REG_READ(0x3FF6A700), REG_READ(0x3FF6A018));
+      REG_WRITE(0x3FF6A700, 0x00000000);
+      Serial.printf("ETH: MAC_TS_CTRL after =0x%08x\n", REG_READ(0x3FF6A700));
+
+      // Step 2: Clear MAC_FLOW_CTRL. If TFE (bit1) is set and the MAC received
+      // a Pause frame (or noise on the line), it will refuse to pull from the
+      // MTL TX FIFO even in loopback mode.
+      if (REG_READ(0x3FF6A018) != 0) {
+        Serial.printf("ETH: MAC_FLOW_CTRL=0x%08x -- clearing\n", REG_READ(0x3FF6A018));
+        REG_WRITE(0x3FF6A018, 0x00000000);
+      }
+
+      // Step 3: Stop+flush+restart TX DMA to drain any stale frames.
       {
         uint32_t tx_state = (REG_READ(0x3FF69014) >> 20) & 7;
         Serial.printf("ETH: link-up  TX_STATE=%d  OP_MODE=0x%08x\n",
                       (int)tx_state, REG_READ(0x3FF69018));
         if (tx_state != 0) {
           Serial.printf("ETH: TX_STATE=%d -- stopping TX DMA to unblock\n", (int)tx_state);
-          // Step 1: stop TX DMA (clear ST bit13)
-          REG_CLR_BIT(0x3FF69018, BIT(13));
+          REG_CLR_BIT(0x3FF69018, BIT(13));  // ST=0
           uint32_t t_stop = millis();
           while (((REG_READ(0x3FF69014) >> 20) & 7) != 0 && (millis() - t_stop < 10)) {}
-          Serial.printf("ETH: after ST=0  TX_STATE=%d  OP_MODE=0x%08x\n",
-                        (int)((REG_READ(0x3FF69014) >> 20) & 7), REG_READ(0x3FF69018));
-          // Step 2: flush TX FIFO while DMA is stopped
-          REG_SET_BIT(0x3FF69018, BIT(20));  // FTF
+          Serial.printf("ETH: after ST=0  TX_STATE=%d\n",
+                        (int)((REG_READ(0x3FF69014) >> 20) & 7));
+          REG_SET_BIT(0x3FF69018, BIT(20));  // FTF: flush TX FIFO
           uint32_t t_flush = millis();
           while ((REG_READ(0x3FF69018) & BIT(20)) && (millis() - t_flush < 10)) {}
-          Serial.printf("ETH: after FTF  OP_MODE=0x%08x  TX_FIFO_ne=%d\n",
-                        REG_READ(0x3FF69018),
+          Serial.printf("ETH: after FTF  fifo_ne=%d\n",
                         (int)((REG_READ(0x3FF6A024) >> 24) & 1));
-          // Step 3: restart TX DMA (set ST bit13)
-          REG_SET_BIT(0x3FF69018, BIT(13));
-          // Step 4: write poll demand to wake DMA
-          REG_WRITE(0x3FF69004, 1);
+          REG_SET_BIT(0x3FF69018, BIT(13));  // ST=1
+          REG_WRITE(0x3FF69004, 1);           // poll demand
           delayMicroseconds(100);
-          Serial.printf("ETH: after ST=1+poll  TX_STATE=%d  OP_MODE=0x%08x  STATUS=0x%08x\n",
+          Serial.printf("ETH: after ST=1+poll  TX_STATE=%d  STATUS=0x%08x\n",
                         (int)((REG_READ(0x3FF69014) >> 20) & 7),
-                        REG_READ(0x3FF69018), REG_READ(0x3FF69014));
+                        REG_READ(0x3FF69014));
         }
       }
-      // Try setting mii_clk_tx_en (bit3) and mii_clk_rx_en (bit4) in ex_clk_ctrl
-      // in addition to ext_en (bit0). These are normally only set in MII mode,
-      // but may be needed to gate the MTL TX FIFO read clock in RMII mode too.
-      Serial.printf("ETH: ex_clk_ctrl before mii_clk_en patch=0x%08x\n", REG_READ(0x3FF69808));
-      REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4));  // mii_clk_tx_en=1, mii_clk_rx_en=1
-      Serial.printf("ETH: ex_clk_ctrl after  mii_clk_en patch=0x%08x\n", REG_READ(0x3FF69808));
 
-      // MAC_TS_CTRL bit13=TSENALL was set by IDF (enable timestamp for all frames).
-      // With TTSE cleared from descriptors, the MAC may try to timestamp every
-      // frame anyway and stall — the MAC TX engine (tfc=3) was seen flushing
-      // frames without MMC_TX incrementing. Clear TSENALL to disable timestamps.
-      Serial.printf("ETH: MAC_TS_CTRL before=0x%08x\n", REG_READ(0x3FF6A700));
-      REG_WRITE(0x3FF6A700, 0x00000000);  // clear all timestamp control bits
-      Serial.printf("ETH: MAC_TS_CTRL after =0x%08x\n", REG_READ(0x3FF6A700));
+      // Step 4: mii_clk_tx_en + mii_clk_rx_en (bits 3+4 of ex_clk_ctrl).
+      REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4));
+      Serial.printf("ETH: ex_clk_ctrl=0x%08x\n", REG_READ(0x3FF69808));
 
-      // MAC loopback test: briefly enable MII loopback (MAC_CR bit12) to test
-      // whether the MAC TX state machine can complete a frame. The MAC IS
-      // activating (tfc=3 seen in poll), but MMC_TX stays 0, suggesting frames
-      // are being flushed before completion. If this clears after MAC_TS_CTRL=0,
-      // timestamps were the culprit.
+      // MAC loopback test: enable MII loopback (MAC_CR bit12) and poll MAC_DEBUG
+      // at 10us resolution to catch transient states. Key states:
+      //   mtltfrcs=1: MTL reading from TX FIFO (normal active TX)
+      //   mtltfrcs=2: MTL waiting for TxStatus from MAC (stalls here if PTP stalls it)
+      //   mtltfrcs=3: MTL writing status / flushing (frame done or aborted)
+      //   mactfcs=3:  MAC TX frame controller writing status (frame completing)
+      // MMC_TX increments only on successful frame completion.
       {
-        Serial.printf("ETH: loopback test -- MAC_CR before=0x%08x  MMC_TX before=%u\n",
-                      REG_READ(0x3FF6A000), REG_READ(0x3FF6A118));
+        Serial.printf("ETH: loopback test -- MAC_CR=0x%08x  MMC_TX=%u  TS_CTRL=0x%08x\n",
+                      REG_READ(0x3FF6A000), REG_READ(0x3FF6A118), REG_READ(0x3FF6A700));
         REG_SET_BIT(0x3FF6A000, BIT(12));  // LM=1: enable MII loopback
         delayMicroseconds(200);
         REG_WRITE(0x3FF69004, 1);           // poll demand
         uint32_t t_lb = millis();
-        uint32_t dbg_peak = 0;
-        while (REG_READ(0x3FF6A118) == 0 && (millis() - t_lb < 500)) {
+        uint32_t dbg_peak = 0, dbg_stall = 0;
+        uint32_t stall_count = 0;
+        while (REG_READ(0x3FF6A118) == 0 && (millis() - t_lb < 1000)) {
           uint32_t d = REG_READ(0x3FF6A024);
-          if (d) dbg_peak = d;
-          delayMicroseconds(100);
+          if (d > dbg_peak) dbg_peak = d;
+          // Count how many samples have mtltfrcs=2 (waiting for TxStatus — PTP stall point)
+          if (((d >> 20) & 3) == 2) { stall_count++; dbg_stall = d; }
+          delayMicroseconds(10);
         }
         uint32_t mmc_lb = REG_READ(0x3FF6A118);
         uint32_t dbg_lb = REG_READ(0x3FF6A024);
         REG_CLR_BIT(0x3FF6A000, BIT(12));  // LM=0: disable loopback
-        Serial.printf("ETH: loopback done  MMC_TX=%u  MAC_DEBUG_peak=0x%08x  MAC_DEBUG_final=0x%08x\n",
+        Serial.printf("ETH: loopback done  MMC_TX=%u  DBG_peak=0x%08x  DBG_final=0x%08x\n",
                       mmc_lb, dbg_peak, dbg_lb);
-        Serial.printf("ETH:   (tpes_peak=%d tfc_peak=%d fifo_ne_peak=%d)\n",
+        Serial.printf("ETH:   peak(tpes=%d tfc=%d mtltfrcs=%d fifo_ne=%d)  stall_count=%u\n",
                       (int)((dbg_peak >> 16) & 1),
                       (int)((dbg_peak >> 17) & 3),
-                      (int)((dbg_peak >> 24) & 1));
+                      (int)((dbg_peak >> 20) & 3),
+                      (int)((dbg_peak >> 24) & 1),
+                      stall_count);
+        if (stall_count > 0) {
+          Serial.printf("ETH:   STALL at mtltfrcs=2 (waiting TxStatus) -- PTP ack blocking TX\n");
+          Serial.printf("ETH:   stall_sample=0x%08x\n", dbg_stall);
+        }
         Serial.printf("ETH: %s\n", mmc_lb > 0
           ? "LOOPBACK OK: MAC TX works"
           : "LOOPBACK FAIL: MAC TX not completing frames");
