@@ -159,6 +159,13 @@ void onEvent(arduino_event_id_t event) {
                         REG_READ(0x3FF69018), REG_READ(0x3FF69014));
         }
       }
+      // Try setting mii_clk_tx_en (bit3) and mii_clk_rx_en (bit4) in ex_clk_ctrl
+      // in addition to ext_en (bit0). These are normally only set in MII mode,
+      // but may be needed to gate the MTL TX FIFO read clock in RMII mode too.
+      Serial.printf("ETH: ex_clk_ctrl before mii_clk_en patch=0x%08x\n", REG_READ(0x3FF69808));
+      REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4));  // mii_clk_tx_en=1, mii_clk_rx_en=1
+      Serial.printf("ETH: ex_clk_ctrl after  mii_clk_en patch=0x%08x\n", REG_READ(0x3FF69808));
+
       // MAC loopback test: briefly enable MII loopback (MAC_CR bit12) to test
       // whether the MAC TX state machine activates at all. In loopback, TX data
       // is fed directly back into RX without going to the RMII wire. If MMC_TX
