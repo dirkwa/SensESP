@@ -120,6 +120,20 @@ void onEvent(arduino_event_id_t event) {
       Serial.printf("ETH: PHY ANAR=0x%04x  ANLPAR=0x%04x\n", anar, anlpar);
       Serial.printf("ETH: PHY PSCSR(31)=0x%04x  speed_ind=%d\n",
                     pscsr, (pscsr>>2)&7);
+
+      // Flush TX FIFO (OP_MODE bit20) to clear any stale state, then re-start TX DMA.
+      // This ensures a clean TX FIFO when the first DHCP frame is sent.
+      Serial.printf("ETH: OP_MODE before flush=0x%08x\n", REG_READ(0x3FF69018));
+      REG_SET_BIT(0x3FF69018, BIT(20));   // FTF: flush TX FIFO
+      uint32_t t_flush = millis();
+      while ((REG_READ(0x3FF69018) & BIT(20)) && (millis() - t_flush < 10)) {}
+      Serial.printf("ETH: OP_MODE after  flush=0x%08x  (FTF cleared=%d)\n",
+                    REG_READ(0x3FF69018), (int)!(REG_READ(0x3FF69018) & BIT(20)));
+      // Re-apply clk_ctrl to make sure ext_en is still set after flush.
+      REG_WRITE(0x3FF69808, 0x01);
+      REG_SET_BIT(0x3FF69804, BIT(24));
+      Serial.printf("ETH: after flush clk_ctrl=0x%08x oscclk=0x%08x\n",
+                    REG_READ(0x3FF69808), REG_READ(0x3FF69804));
       break;
     }
     case ARDUINO_EVENT_ETH_GOT_IP:
@@ -280,9 +294,9 @@ void loop() {
                   REG_READ(0x3FF6A700));
     if (dma_tx_desc >= 0x3FF00000 && dma_tx_desc <= 0x3FFFFFFF) {
       volatile uint32_t* d = (volatile uint32_t*)dma_tx_desc;
-      Serial.printf("  TX_DESC @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d TTSE=%d\n",
+      Serial.printf("  TX_DESC @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x OWN=%d IC=%d TTSE=%d\n",
                     dma_tx_desc, d[0], d[1], d[2], d[3],
-                    (int)(d[0] >> 31), (int)((d[0] >> 30) & 1));
+                    (int)(d[0] >> 31), (int)((d[0] >> 30) & 1), (int)((d[0] >> 25) & 1));
     }
     if (dma_tx_list >= 0x3FF00000 && dma_tx_list <= 0x3FFFFFFF) {
       volatile uint32_t* d = (volatile uint32_t*)dma_tx_list;
@@ -305,8 +319,8 @@ void loop() {
       for (int i = 0; i < 32; i++) {
         if (desc < 0x3FF00000 || desc > 0x3FFFFFFF) break;
         volatile uint32_t* d = (volatile uint32_t*)desc;
-        Serial.printf("    TX[%2d] @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x  TTSE=%d\n",
-                      i, desc, d[0], d[1], d[2], d[3], (int)((d[0]>>30)&1));
+        Serial.printf("    TX[%2d] @0x%08x  DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x  OWN=%d IC=%d TTSE=%d\n",
+                      i, desc, d[0], d[1], d[2], d[3], (int)(d[0]>>31), (int)((d[0]>>30)&1), (int)((d[0]>>25)&1));
         if (d[3] == dma_tx_list) { Serial.println("    (ring end)"); break; }
         desc = d[3];
       }
