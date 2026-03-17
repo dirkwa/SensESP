@@ -297,10 +297,18 @@ void setup() {
   Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d (need 5)\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
 
+  // PHY reset: GPIO17 LOW also disables the 50MHz oscillator, which removes
+  // the RMII REF_CLK from GPIO0. Re-apply the IOMUX after the pulse.
   digitalWrite(PHY_RST_PIN, LOW);
   delay(10);
   digitalWrite(PHY_RST_PIN, HIGH);
-  delay(50);
+  // Re-apply GPIO0 IOMUX after oscillator restart (clock was absent during reset)
+  esp_gpio_revoke(BIT64(GPIO_NUM_0));
+  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
+  PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
+  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
+  delay(300);  // LAN8720 needs >100ms after nRST=HIGH before MDIO is ready
   Serial.println("ETH: PHY reset done");
 #else
   // Internal clock mode: IDF drives GPIO17 as clock output.
