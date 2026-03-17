@@ -437,15 +437,24 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
     uint32_t tdes0_bad_bits = BIT(25) | BIT(20);  // TTSE | DC
     esp_eth_ioctl(_eth_handle, (esp_eth_io_cmd_t)ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS, &tdes0_bad_bits);
   }
-  // The DMA may already be stuck in TX_STATE=6 (timestamp-write deadlock) if
-  // it processed TTSE=1 descriptors before the ioctl above ran. In state=6 the
-  // DMA waits forever for TxTimestampStatus from the disabled MAC timestamp
-  // engine. The frame is already in the MTL TX FIFO at this point, but the DMA
-  // won't advance and the MAC won't transmit because it's waiting for DMA.
-  //
-  // Fix: stop the TX DMA (clear ST bit13 of OP_MODE), flush the TX FIFO (FTF),
-  // then restart the TX DMA. With TTSE cleared from all descriptors (step above),
-  // the DMA will process the queued frames without entering state=6 again.
+  // The ioctl above only fixes the template for future frames. Frames already
+  // enqueued in the TX descriptor ring (e.g. DHCP DISCOVERs sent before
+  // ETH_CONNECTED fired) still have TTSE=1 and DC=1 in their descriptors.
+  // Walk the ring and clear both bits from every CPU-owned (OWN=0) descriptor.
+  // DMA TX list base = 0x3FF69010; each descriptor is 4×uint32_t.
+  {
+    uint32_t desc_addr = REG_READ(0x3FF69010);  // dmatxbaseaddr
+    const uint32_t bad_bits = BIT(25) | BIT(20);
+    for (int i = 0; i < 32 && desc_addr >= 0x3FF00000 && desc_addr <= 0x3FFFFFFF; i++) {
+      volatile uint32_t* d = (volatile uint32_t*)desc_addr;
+      if (d[0] & bad_bits) d[0] &= ~bad_bits;  // clear TTSE+DC if set
+      uint32_t next = d[3];
+      if (next == REG_READ(0x3FF69010)) break;  // ring end
+      desc_addr = next;
+    }
+  }
+  // Stop+flush+restart TX DMA to drain any already-queued frames that were
+  // loaded into the MTL TX FIFO before the descriptor walk above.
   // DMA OP_MODE = 0x3FF69018; DMA STATUS TX_STATE = bits[22:20] of 0x3FF69014.
   // dmatxpolldemand = 0x3FF69004 (write any value to re-trigger suspended DMA).
   if (((REG_READ(0x3FF69014) >> 20) & 7) != 0) {
