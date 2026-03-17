@@ -421,17 +421,21 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
   }
 
 #if CONFIG_IDF_TARGET_ESP32 && CONFIG_ETH_USE_ESP32_EMAC
-  // IDF sets TTSE (TransmitTimestampEnable, bit25 of TDES0) in every TX
-  // descriptor. This causes TX_STATE=6 (timestamp-write deadlock): the DMA
-  // waits for TxTimestampStatus after "transmitting" but the MAC timestamp
-  // engine is off (MAC_TS_CTRL bit0=0), so it waits forever.
+  // IDF sets two problematic bits in the TDES0 descriptor template:
   //
-  // Fix in two steps:
-  // 1. Clear TTSE from the driver's TDES0 template (affects future frames).
-  // 2. Stop+flush+restart TX DMA to drain any already-queued TTSE=1 frames.
+  // Bit 25 = TTSE (TransmitTimestampEnable): causes TX_STATE=6 deadlock —
+  //   the DMA waits for TxTimestampStatus but the MAC timestamp engine is off.
+  //
+  // Bit 20 = DC (Disable CRC): instructs the MAC not to append FCS to the
+  //   frame. The MAC transmits the frame, the switch rejects it (no FCS),
+  //   and the MAC reports an error status — so MMC_TX never increments and
+  //   DHCP DISCOVER frames are silently dropped.
+  //
+  // Clear both from the driver's TDES0 template so all future frames get
+  // CRC appended and no timestamp is requested.
   {
-    uint32_t ttse_mask = BIT(25);  // EMAC_HAL_TDES0_TX_TS_ENABLE
-    esp_eth_ioctl(_eth_handle, (esp_eth_io_cmd_t)ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS, &ttse_mask);
+    uint32_t tdes0_bad_bits = BIT(25) | BIT(20);  // TTSE | DC
+    esp_eth_ioctl(_eth_handle, (esp_eth_io_cmd_t)ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS, &tdes0_bad_bits);
   }
   // The DMA may already be stuck in TX_STATE=6 (timestamp-write deadlock) if
   // it processed TTSE=1 descriptors before the ioctl above ran. In state=6 the
