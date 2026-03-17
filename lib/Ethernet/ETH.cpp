@@ -421,12 +421,14 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
   }
 
 #if CONFIG_IDF_TARGET_ESP32 && CONFIG_ETH_USE_ESP32_EMAC
-  // IDF sets TTSE (bit30 of TDES0) in every TX descriptor to enable IEEE-1588
-  // timestamping, causing DMA TX_STATE=6 (timestamp write) for every frame and
-  // stalling TX. Use the MAC ioctl to clear TTSE from the DMA's descriptor
-  // template so it is never set in future TX descriptors.
+  // IDF sets TTSE (TransmitTimestampEnable, bit25 of TDES0) in every TX
+  // descriptor to enable IEEE-1588 timestamping. This causes the DMA to enter
+  // TX_STATE=6 (suspended/timestamp-write) after every frame. Use the MAC
+  // ioctl to clear TTSE from the DMA's descriptor template so it is never set
+  // in future TX descriptors.
+  // Note: IC (InterruptOnComplete) is at bit30 — do NOT clear that.
   {
-    uint32_t ttse_mask = BIT(30);
+    uint32_t ttse_mask = BIT(25);  // TransmitTimestampEnable (EMAC_HAL_TDES0_TX_TS_ENABLE)
     esp_eth_ioctl(_eth_handle, (esp_eth_io_cmd_t)ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS, &ttse_mask);
   }
 #endif

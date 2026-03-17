@@ -91,23 +91,6 @@ void onEvent(arduino_event_id_t event) {
       break;
     }
     case ARDUINO_EVENT_ETH_CONNECTED: {
-      // The Synopsys GMAC DMA loads dmatxcurrdesc from dmatxbaseaddr only when
-      // ST (bit13 of OP_MODE) transitions 0→1. During emac_esp32_start(), ST is
-      // set before descriptors are allocated (TX_LIST=0 at that point), so
-      // dmatxcurrdesc stays 0. Restart the TX DMA here so it loads the valid
-      // TX_LIST base address into dmatxcurrdesc.
-      {
-        uint32_t op = REG_READ(0x3FF69018);
-        if (op & (1u<<13)) {
-          REG_WRITE(0x3FF69018, op & ~(1u<<13));  // ST=0: stop TX DMA
-          uint32_t t0 = millis();
-          while (((REG_READ(0x3FF69014)>>20)&7) != 0 && millis()-t0 < 10) {}
-          REG_WRITE(0x3FF69018, op | (1u<<13));    // ST=1: restart TX DMA
-          REG_WRITE(0x3FF69004, 1);                // TX poll demand
-          Serial.printf("ETH: DMA TX restarted  TX_DESC=0x%08x  TX_STATE=%d\n",
-                        REG_READ(0x3FF69048), (int)((REG_READ(0x3FF69014)>>20)&7));
-        }
-      }
       uint32_t mac_cr = REG_READ(0x3FF6A000);
       Serial.printf("ETH: Link up  TX_LIST=0x%08x  RX_LIST=0x%08x  OP_MODE=0x%08x\n",
                     REG_READ(0x3FF69010), REG_READ(0x3FF6900C), REG_READ(0x3FF69018));
