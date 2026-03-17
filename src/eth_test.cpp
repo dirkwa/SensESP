@@ -134,6 +134,16 @@ void onEvent(arduino_event_id_t event) {
       REG_SET_BIT(0x3FF69804, BIT(24));
       Serial.printf("ETH: after flush clk_ctrl=0x%08x oscclk=0x%08x\n",
                     REG_READ(0x3FF69808), REG_READ(0x3FF69804));
+      // If DMA is in TX_STATE=6 (timestamp-write deadlock), pulse TSENA to unblock it.
+      if (((REG_READ(0x3FF69014) >> 20) & 7) == 6) {
+        Serial.printf("ETH: TX_STATE=6 on link-up, pulsing TSENA to unblock\n");
+        REG_SET_BIT(0x3FF6A700, BIT(0));
+        uint32_t t_ts = millis();
+        while (((REG_READ(0x3FF69014) >> 20) & 7) == 6 && (millis() - t_ts < 5)) {}
+        REG_CLR_BIT(0x3FF6A700, BIT(0));
+        Serial.printf("ETH: after TSENA pulse TX_STATE=%d  MAC_TS_CTRL=0x%08x\n",
+                      (int)((REG_READ(0x3FF69014) >> 20) & 7), REG_READ(0x3FF6A700));
+      }
       // Poll dmatxcurraddr_buf (0x3FF69050) rapidly for 2s to catch DMA reading TX buffer.
       // If it ever differs from dmarxcurraddr_buf (0x3FF69054), DMA is reading TX data.
       Serial.printf("ETH: polling TX_BUF for 2s (ST=%d SR=%d)\n",

@@ -434,22 +434,21 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
     uint32_t ttse_mask = BIT(25);  // EMAC_HAL_TDES0_TX_TS_ENABLE
     esp_eth_ioctl(_eth_handle, (esp_eth_io_cmd_t)ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS, &ttse_mask);
   }
-  // Walk TX ring: clear TTSE from any OWN=1 (DMA-owned) pending descriptors.
-  // DMA base 0x3FF69000; dmatxbaseaddr at +0x10, dmatxcurrdesc at +0x48.
-  {
-    uint32_t tx_list = REG_READ(0x3FF69010);  // dmatxbaseaddr
-    if (tx_list >= 0x3FF00000 && tx_list <= 0x3FFFFFFF) {
-      volatile uint32_t* desc = (volatile uint32_t*)tx_list;
-      for (int i = 0; i < 32; i++) {
-        if (desc[0] & BIT(31)) {           // OWN=1: DMA owns this descriptor
-          desc[0] &= ~BIT(25);             // clear TTSE
-        }
-        uint32_t next = desc[3];           // DES3 = next descriptor address
-        if (next == tx_list) break;        // ring end
-        if (next < 0x3FF00000 || next > 0x3FFFFFFF) break;
-        desc = (volatile uint32_t*)next;
-      }
-    }
+  // The DMA may already be stuck in TX_STATE=6 (timestamp-write) if it
+  // processed TTSE=1 descriptors before the ioctl above ran. In state=6 the
+  // DMA waits for the MAC to set TxTimestampStatus in TDES0; that only happens
+  // when the MAC timestamp engine (MAC_TS_CTRL bit0 = TSENA) is enabled.
+  //
+  // Fix: briefly enable the timestamp engine so the MAC can complete any
+  // pending timestamp capture and release the DMA from state=6. Then
+  // immediately disable it again.  Poll until TX_STATE != 6 or 1ms timeout.
+  // MAC_TS_CTRL = 0x3FF6A700; DMA STATUS TX_STATE = bits[22:20] of 0x3FF69014.
+  if (((REG_READ(0x3FF69014) >> 20) & 7) == 6) {
+    REG_SET_BIT(0x3FF6A700, BIT(0));   // TSENA=1: enable timestamp engine
+    uint32_t t_ts = esp_timer_get_time();
+    while (((REG_READ(0x3FF69014) >> 20) & 7) == 6 &&
+           (esp_timer_get_time() - t_ts) < 1000) {}
+    REG_CLR_BIT(0x3FF6A700, BIT(0));   // TSENA=0: disable again
   }
 #endif
 
