@@ -159,6 +159,34 @@ void onEvent(arduino_event_id_t event) {
                         REG_READ(0x3FF69018), REG_READ(0x3FF69014));
         }
       }
+      // MAC loopback test: briefly enable MII loopback (MAC_CR bit12) to test
+      // whether the MAC TX state machine activates at all. In loopback, TX data
+      // is fed directly back into RX without going to the RMII wire. If MMC_TX
+      // increments during loopback, the MAC TX engine works and the problem is
+      // the RMII output path. If MMC_TX stays zero, the MAC TX itself is broken.
+      {
+        Serial.printf("ETH: loopback test -- MAC_CR before=0x%08x  MMC_TX before=%u\n",
+                      REG_READ(0x3FF6A000), REG_READ(0x3FF6A118));
+        REG_SET_BIT(0x3FF6A000, BIT(12));  // LM=1: enable MII loopback
+        delayMicroseconds(200);
+        REG_WRITE(0x3FF69004, 1);           // poll demand
+        uint32_t t_lb = millis();
+        while (REG_READ(0x3FF6A118) == 0 && (millis() - t_lb < 500)) {
+          delayMicroseconds(100);
+        }
+        uint32_t mmc_lb = REG_READ(0x3FF6A118);
+        uint32_t dbg_lb = REG_READ(0x3FF6A024);
+        REG_CLR_BIT(0x3FF6A000, BIT(12));  // LM=0: disable loopback
+        Serial.printf("ETH: loopback test done  MMC_TX=%u  MAC_DEBUG=0x%08x  (tpes=%d tfc=%d fifo_ne=%d)\n",
+                      mmc_lb, dbg_lb,
+                      (int)((dbg_lb >> 16) & 1),
+                      (int)((dbg_lb >> 17) & 3),
+                      (int)((dbg_lb >> 24) & 1));
+        Serial.printf("ETH: %s\n", mmc_lb > 0
+          ? "LOOPBACK OK: MAC TX works, problem is RMII output path"
+          : "LOOPBACK FAIL: MAC TX engine not activating at all");
+      }
+
       // Poll MAC_DEBUG, TX_BUF and MMC_TX rapidly for 5s to catch MAC TX activity.
       // MAC_DEBUG bits [18:17] = mactfcs (TX frame controller state),
       //   bit16=mactpes (TX protocol engine active), bit24=mtltfnes (FIFO not empty).
