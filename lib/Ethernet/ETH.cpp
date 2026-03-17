@@ -428,27 +428,33 @@ bool ETHClass::begin(eth_phy_type_t type, int32_t phy_addr, int mdc, int mdio, i
   //
   // Fix in two steps:
   // 1. Clear TTSE from the driver's TDES0 template (affects future frames).
-  // 2. Walk the TX descriptor ring and clear TTSE from any OWN=1 descriptors
-  //    that were already queued before esp_eth_start() returned.
+  // 2. Stop+flush+restart TX DMA to drain any already-queued TTSE=1 frames.
   {
     uint32_t ttse_mask = BIT(25);  // EMAC_HAL_TDES0_TX_TS_ENABLE
     esp_eth_ioctl(_eth_handle, (esp_eth_io_cmd_t)ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS, &ttse_mask);
   }
-  // The DMA may already be stuck in TX_STATE=6 (timestamp-write) if it
-  // processed TTSE=1 descriptors before the ioctl above ran. In state=6 the
-  // DMA waits for the MAC to set TxTimestampStatus in TDES0; that only happens
-  // when the MAC timestamp engine (MAC_TS_CTRL bit0 = TSENA) is enabled.
+  // The DMA may already be stuck in TX_STATE=6 (timestamp-write deadlock) if
+  // it processed TTSE=1 descriptors before the ioctl above ran. In state=6 the
+  // DMA waits forever for TxTimestampStatus from the disabled MAC timestamp
+  // engine. The frame is already in the MTL TX FIFO at this point, but the DMA
+  // won't advance and the MAC won't transmit because it's waiting for DMA.
   //
-  // Fix: briefly enable the timestamp engine so the MAC can complete any
-  // pending timestamp capture and release the DMA from state=6. Then
-  // immediately disable it again.  Poll until TX_STATE != 6 or 1ms timeout.
-  // MAC_TS_CTRL = 0x3FF6A700; DMA STATUS TX_STATE = bits[22:20] of 0x3FF69014.
-  if (((REG_READ(0x3FF69014) >> 20) & 7) == 6) {
-    REG_SET_BIT(0x3FF6A700, BIT(0));   // TSENA=1: enable timestamp engine
-    uint32_t t_ts = esp_timer_get_time();
-    while (((REG_READ(0x3FF69014) >> 20) & 7) == 6 &&
-           (esp_timer_get_time() - t_ts) < 1000) {}
-    REG_CLR_BIT(0x3FF6A700, BIT(0));   // TSENA=0: disable again
+  // Fix: stop the TX DMA (clear ST bit13 of OP_MODE), flush the TX FIFO (FTF),
+  // then restart the TX DMA. With TTSE cleared from all descriptors (step above),
+  // the DMA will process the queued frames without entering state=6 again.
+  // DMA OP_MODE = 0x3FF69018; DMA STATUS TX_STATE = bits[22:20] of 0x3FF69014.
+  // dmatxpolldemand = 0x3FF69004 (write any value to re-trigger suspended DMA).
+  if (((REG_READ(0x3FF69014) >> 20) & 7) != 0) {
+    REG_CLR_BIT(0x3FF69018, BIT(13));   // ST=0: stop TX DMA
+    uint32_t t_stop = esp_timer_get_time();
+    while (((REG_READ(0x3FF69014) >> 20) & 7) != 0 &&
+           (esp_timer_get_time() - t_stop) < 2000) {}
+    REG_SET_BIT(0x3FF69018, BIT(20));   // FTF: flush TX FIFO
+    t_stop = esp_timer_get_time();
+    while ((REG_READ(0x3FF69018) & BIT(20)) &&
+           (esp_timer_get_time() - t_stop) < 2000) {}
+    REG_SET_BIT(0x3FF69018, BIT(13));   // ST=1: restart TX DMA
+    REG_WRITE(0x3FF69004, 1);            // poll demand: wake suspended DMA
   }
 #endif
 

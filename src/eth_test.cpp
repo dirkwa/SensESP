@@ -121,28 +121,43 @@ void onEvent(arduino_event_id_t event) {
       Serial.printf("ETH: PHY PSCSR(31)=0x%04x  speed_ind=%d\n",
                     pscsr, (pscsr>>2)&7);
 
-      // Flush TX FIFO (OP_MODE bit20) to clear any stale state, then re-start TX DMA.
-      // This ensures a clean TX FIFO when the first DHCP frame is sent.
-      Serial.printf("ETH: OP_MODE before flush=0x%08x\n", REG_READ(0x3FF69018));
-      REG_SET_BIT(0x3FF69018, BIT(20));   // FTF: flush TX FIFO
-      uint32_t t_flush = millis();
-      while ((REG_READ(0x3FF69018) & BIT(20)) && (millis() - t_flush < 10)) {}
-      Serial.printf("ETH: OP_MODE after  flush=0x%08x  (FTF cleared=%d)\n",
-                    REG_READ(0x3FF69018), (int)!(REG_READ(0x3FF69018) & BIT(20)));
-      // Re-apply clk_ctrl to make sure ext_en and clk_en are set after flush.
+      // Re-apply clk_ctrl.
       REG_WRITE(0x3FF69808, 0x01);  // ext_en=1 only (IDF default)
       REG_SET_BIT(0x3FF69804, BIT(24));
-      Serial.printf("ETH: after flush clk_ctrl=0x%08x oscclk=0x%08x\n",
-                    REG_READ(0x3FF69808), REG_READ(0x3FF69804));
-      // If DMA is in TX_STATE=6 (timestamp-write deadlock), pulse TSENA to unblock it.
-      if (((REG_READ(0x3FF69014) >> 20) & 7) == 6) {
-        Serial.printf("ETH: TX_STATE=6 on link-up, pulsing TSENA to unblock\n");
-        REG_SET_BIT(0x3FF6A700, BIT(0));
-        uint32_t t_ts = millis();
-        while (((REG_READ(0x3FF69014) >> 20) & 7) == 6 && (millis() - t_ts < 5)) {}
-        REG_CLR_BIT(0x3FF6A700, BIT(0));
-        Serial.printf("ETH: after TSENA pulse TX_STATE=%d  MAC_TS_CTRL=0x%08x\n",
-                      (int)((REG_READ(0x3FF69014) >> 20) & 7), REG_READ(0x3FF6A700));
+
+      // If DMA is in TX_STATE=6 (TTSE timestamp-write deadlock), unblock it by
+      // stopping and restarting the TX DMA. Clearing ST aborts state=6 and puts
+      // DMA into "stopped" state; re-setting ST makes it re-read from the head
+      // of the TX descriptor ring. We also flush the TX FIFO (FTF) while ST=0
+      // to drain any stale frame data.
+      {
+        uint32_t tx_state = (REG_READ(0x3FF69014) >> 20) & 7;
+        Serial.printf("ETH: link-up  TX_STATE=%d  OP_MODE=0x%08x\n",
+                      (int)tx_state, REG_READ(0x3FF69018));
+        if (tx_state != 0) {
+          Serial.printf("ETH: TX_STATE=%d -- stopping TX DMA to unblock\n", (int)tx_state);
+          // Step 1: stop TX DMA (clear ST bit13)
+          REG_CLR_BIT(0x3FF69018, BIT(13));
+          uint32_t t_stop = millis();
+          while (((REG_READ(0x3FF69014) >> 20) & 7) != 0 && (millis() - t_stop < 10)) {}
+          Serial.printf("ETH: after ST=0  TX_STATE=%d  OP_MODE=0x%08x\n",
+                        (int)((REG_READ(0x3FF69014) >> 20) & 7), REG_READ(0x3FF69018));
+          // Step 2: flush TX FIFO while DMA is stopped
+          REG_SET_BIT(0x3FF69018, BIT(20));  // FTF
+          uint32_t t_flush = millis();
+          while ((REG_READ(0x3FF69018) & BIT(20)) && (millis() - t_flush < 10)) {}
+          Serial.printf("ETH: after FTF  OP_MODE=0x%08x  TX_FIFO_ne=%d\n",
+                        REG_READ(0x3FF69018),
+                        (int)((REG_READ(0x3FF6A024) >> 24) & 1));
+          // Step 3: restart TX DMA (set ST bit13)
+          REG_SET_BIT(0x3FF69018, BIT(13));
+          // Step 4: write poll demand to wake DMA
+          REG_WRITE(0x3FF69004, 1);
+          delayMicroseconds(100);
+          Serial.printf("ETH: after ST=1+poll  TX_STATE=%d  OP_MODE=0x%08x  STATUS=0x%08x\n",
+                        (int)((REG_READ(0x3FF69014) >> 20) & 7),
+                        REG_READ(0x3FF69018), REG_READ(0x3FF69014));
+        }
       }
       // Poll dmatxcurraddr_buf (0x3FF69050) rapidly for 2s to catch DMA reading TX buffer.
       // If it ever differs from dmarxcurraddr_buf (0x3FF69054), DMA is reading TX data.
