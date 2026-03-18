@@ -233,8 +233,10 @@ void onEvent(arduino_event_id_t event) {
         (void)REG_READ(0x3FF6A16C);
         (void)REG_READ(0x3FF6A178);
 
-        // Enable loopback, restart DMA, issue poll demand
+        // Enable loopback, reset DMA to ring start, restart, poll demand.
+        // Writing TX_LIST while ST=0 resets the DMA fetch pointer to TX[0].
         REG_SET_BIT(0x3FF6A000, BIT(12));  // LM=1
+        REG_WRITE(0x3FF69010, tx_list);    // reset DMA pointer to TX[0]
         REG_SET_BIT(0x3FF69018, BIT(13));  // ST=1
         REG_WRITE(0x3FF69004, 1);           // poll demand
 
