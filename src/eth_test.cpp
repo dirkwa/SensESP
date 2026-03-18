@@ -233,9 +233,10 @@ void onEvent(arduino_event_id_t event) {
         (void)REG_READ(0x3FF6A16C);
         (void)REG_READ(0x3FF6A178);
 
-        // Enable loopback, reset DMA to ring start, restart, poll demand.
+        // Send frame for real (no loopback) — reset DMA to ring start, restart.
+        // LM=0: frame goes to wire. MMC_TX increments if MAC TX works.
         // Writing TX_LIST while ST=0 resets the DMA fetch pointer to TX[0].
-        REG_SET_BIT(0x3FF6A000, BIT(12));  // LM=1
+        REG_CLR_BIT(0x3FF6A000, BIT(12));  // LM=0 (no loopback — real TX)
         REG_WRITE(0x3FF69010, tx_list);    // reset DMA pointer to TX[0]
         REG_SET_BIT(0x3FF69018, BIT(13));  // ST=1
         REG_WRITE(0x3FF69004, 1);           // poll demand
@@ -255,7 +256,6 @@ void onEvent(arduino_event_id_t event) {
         uint32_t mmc_g   = REG_READ(0x3FF6A16C);
         uint32_t mmc_car = REG_READ(0x3FF6A178);
         uint32_t dbg_end = REG_READ(0x3FF6A024);
-        REG_CLR_BIT(0x3FF6A000, BIT(12));  // LM=0
 
         // Read back TX[0] descriptor status
         uint32_t des0_after = 0;
