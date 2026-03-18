@@ -153,112 +153,15 @@ void onEvent(arduino_event_id_t event) {
                       (int)(REG_READ(0x3FF6A0D8)&1));
       }
 
-      // Re-apply clk_ctrl.
-      REG_WRITE(0x3FF69808, 0x01);  // ext_en=1 only (IDF default)
-      REG_SET_BIT(0x3FF69804, BIT(24));
-
-      // Step 1: Clear MAC_TS_CTRL BEFORE touching the DMA or MAC TX.
-      // IDF sets TSENALL (bit13) which arms the PTP timestamp capture for every
-      // frame. With TSENA (bit0)=0 the PTP clock is ungated but uninitialized.
-      // Gemini confirmed: the MAC waits for a Timestamp Snapshot Acknowledge
-      // before signalling frame completion to MMC — so MMC_TX never increments
-      // and tfc reaches 3 ("writing status") then silently aborts.
-      // Clear ALL timestamp bits now, before the DMA restart, so no queued frame
-      // ever hits the PTP ack path.
+      // Clear MAC_TS_CTRL — IDF v5 sets TSENALL (bit13) during esp_eth_start().
       Serial.printf("ETH: MAC_TS_CTRL before=0x%08x  FLOW=0x%08x\n",
                     REG_READ(0x3FF6A700), REG_READ(0x3FF6A018));
       REG_WRITE(0x3FF6A700, 0x00000000);
-      Serial.printf("ETH: MAC_TS_CTRL after =0x%08x\n", REG_READ(0x3FF6A700));
-
-      // Step 2: Clear MAC_FLOW_CTRL. If TFE (bit1) is set and the MAC received
-      // a Pause frame (or noise on the line), it will refuse to pull from the
-      // MTL TX FIFO even in loopback mode.
-      if (REG_READ(0x3FF6A018) != 0) {
-        Serial.printf("ETH: MAC_FLOW_CTRL=0x%08x -- clearing\n", REG_READ(0x3FF6A018));
-        REG_WRITE(0x3FF6A018, 0x00000000);
-      }
-
-      // Step 3: Stop+flush+restart TX DMA to drain any stale frames.
-      // Also clear TSF (TX Store-and-Forward, bit21) — use threshold mode instead
-      // to rule out a FIFO trigger issue. And give OWN=1 back to TX[0-3] so the
-      // DMA can retransmit the queued DHCP frames after restart.
-      {
-        uint32_t tx_state = (REG_READ(0x3FF69014) >> 20) & 7;
-        Serial.printf("ETH: link-up  TX_STATE=%d  OP_MODE=0x%08x\n",
-                      (int)tx_state, REG_READ(0x3FF69018));
-        // Always stop+flush regardless of TX_STATE — the DMA may have silently
-        // consumed OWN=1 descriptors without transmitting.
-        Serial.printf("ETH: stopping TX DMA\n");
-        REG_CLR_BIT(0x3FF69018, BIT(13));  // ST=0
-        uint32_t t_stop = millis();
-        while (((REG_READ(0x3FF69014) >> 20) & 7) != 0 && (millis() - t_stop < 20)) {}
-        Serial.printf("ETH: after ST=0  TX_STATE=%d\n",
-                      (int)((REG_READ(0x3FF69014) >> 20) & 7));
-        REG_SET_BIT(0x3FF69018, BIT(20));  // FTF: flush TX FIFO
-        uint32_t t_flush = millis();
-        while ((REG_READ(0x3FF69018) & BIT(20)) && (millis() - t_flush < 20)) {}
-        Serial.printf("ETH: after FTF  fifo_ne=%d  OP_MODE=0x%08x\n",
-                      (int)((REG_READ(0x3FF6A024) >> 24) & 1),
-                      REG_READ(0x3FF69018));
-
-        // Clear TSF (bit21): use threshold mode (TTC=0 = 64-byte threshold).
-        // With TSF the MAC waits for the whole frame before starting TX — if
-        // there's a FIFO threshold bug this would stall forever.
-        REG_CLR_BIT(0x3FF69018, BIT(21));
-        Serial.printf("ETH: cleared TSF  OP_MODE=0x%08x\n", REG_READ(0x3FF69018));
-
-        // Reset DMATXDESCL (0x3FF69010) to TX_LIST while ST=0.
-        // This resets the DMA's internal curr_tx_desc pointer to the ring start.
-        // Without this the DMA resumes scanning from wherever it stopped (e.g. TX[4])
-        // and will never see the OWN=1 frames we restored at TX[0-3].
-        uint32_t tx_list = REG_READ(0x3FF69010);
-        if (tx_list >= 0x3FF00000 && tx_list <= 0x3FFFFFFF) {
-          Serial.printf("ETH: rewriting DMATXDESCL=0x%08x (resets DMA scan pointer)\n", tx_list);
-          REG_WRITE(0x3FF69010, tx_list);  // reload while ST=0 to reset DMA pointer
-          delayMicroseconds(10);
-          Serial.printf("ETH: DMATXCURRDESC after reload=0x%08x (should equal TX_LIST)\n",
-                        REG_READ(0x3FF69048));
-        }
-        if (tx_list >= 0x3FF00000 && tx_list <= 0x3FFFFFFF) {
-          uint32_t desc_addr = tx_list;
-          for (int i = 0; i < 10; i++) {
-            if (desc_addr < 0x3FF00000 || desc_addr > 0x3FFFFFFF) break;
-            volatile uint32_t* desc = (volatile uint32_t*)desc_addr;
-            // Only restore OWN if FS+LS set (single-buffer frame) and length>0
-            if ((desc[0] & 0x30000000) == 0x30000000 && (desc[1] & 0x7FFF) > 0) {
-              Serial.printf("ETH: restoring OWN=1 on TX[%d] @0x%08x DES0=0x%08x len=%d\n",
-                            i, desc_addr, desc[0], (int)(desc[1] & 0x7FFF));
-              desc[0] |= 0x80000000;  // OWN=1
-            }
-            uint32_t next = desc[3];
-            if (next == tx_list) break;  // ring end
-            desc_addr = next;
-          }
-        }
-
-        REG_SET_BIT(0x3FF69018, BIT(13));  // ST=1
-        REG_WRITE(0x3FF69004, 1);           // poll demand
-        delayMicroseconds(200);
-        Serial.printf("ETH: after ST=1+poll  TX_STATE=%d  STATUS=0x%08x  OP_MODE=0x%08x\n",
-                      (int)((REG_READ(0x3FF69014) >> 20) & 7),
-                      REG_READ(0x3FF69014), REG_READ(0x3FF69018));
-        // Check if OWN bits were consumed by the DMA
-        if (tx_list >= 0x3FF00000 && tx_list <= 0x3FFFFFFF) {
-          uint32_t desc_addr = tx_list;
-          for (int i = 0; i < 10; i++) {
-            if (desc_addr < 0x3FF00000 || desc_addr > 0x3FFFFFFF) break;
-            volatile uint32_t* desc = (volatile uint32_t*)desc_addr;
-            if ((desc[0] & 0x30000000) == 0x30000000)
-              Serial.printf("ETH: TX[%d] @0x%08x DES0=0x%08x OWN=%d after restart\n",
-                            i, desc_addr, desc[0], (int)(desc[0]>>31));
-            uint32_t next = desc[3];
-            if (next == tx_list) break;
-            desc_addr = next;
-          }
-        }
-      }
-
-      // Step 4: mii_clk_tx_en + mii_clk_rx_en (bits 3+4 of ex_clk_ctrl).
+      Serial.printf("ETH: MAC_TS_CTRL after =0x%08x  TX_STATE=%d  OP_MODE=0x%08x\n",
+                    REG_READ(0x3FF6A700),
+                    (int)((REG_READ(0x3FF69014)>>20)&7),
+                    REG_READ(0x3FF69018));
+      // mii_clk_tx_en + mii_clk_rx_en
       REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4));
       Serial.printf("ETH: ex_clk_ctrl=0x%08x\n", REG_READ(0x3FF69808));
 
