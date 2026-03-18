@@ -207,9 +207,18 @@ void onEvent(arduino_event_id_t event) {
         REG_CLR_BIT(0x3FF69018, BIT(21));
         Serial.printf("ETH: cleared TSF  OP_MODE=0x%08x\n", REG_READ(0x3FF69018));
 
-        // Restore OWN=1 on TX[0-3] so the DMA can retransmit the queued frames.
-        // Walk the descriptor chain via DES3 (next-descriptor pointer).
+        // Reset DMATXDESCL (0x3FF69010) to TX_LIST while ST=0.
+        // This resets the DMA's internal curr_tx_desc pointer to the ring start.
+        // Without this the DMA resumes scanning from wherever it stopped (e.g. TX[4])
+        // and will never see the OWN=1 frames we restored at TX[0-3].
         uint32_t tx_list = REG_READ(0x3FF69010);
+        if (tx_list >= 0x3FF00000 && tx_list <= 0x3FFFFFFF) {
+          Serial.printf("ETH: rewriting DMATXDESCL=0x%08x (resets DMA scan pointer)\n", tx_list);
+          REG_WRITE(0x3FF69010, tx_list);  // reload while ST=0 to reset DMA pointer
+          delayMicroseconds(10);
+          Serial.printf("ETH: DMATXCURRDESC after reload=0x%08x (should equal TX_LIST)\n",
+                        REG_READ(0x3FF69048));
+        }
         if (tx_list >= 0x3FF00000 && tx_list <= 0x3FFFFFFF) {
           uint32_t desc_addr = tx_list;
           for (int i = 0; i < 10; i++) {
