@@ -165,89 +165,119 @@ void onEvent(arduino_event_id_t event) {
       REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4));
       Serial.printf("ETH: ex_clk_ctrl=0x%08x\n", REG_READ(0x3FF69808));
 
-      // MAC loopback test: enable MII loopback (MAC_CR bit12) and poll MAC_DEBUG
-      // at 10us resolution to catch transient states. Key states:
-      //   mtltfrcs=1: MTL reading from TX FIFO (normal active TX)
-      //   mtltfrcs=2: MTL waiting for TxStatus from MAC (stalls here if PTP stalls it)
-      //   mtltfrcs=3: MTL writing status / flushing (frame done or aborted)
-      //   mactfcs=3:  MAC TX frame controller writing status (frame completing)
-      // MMC_TX increments only on successful frame completion.
+      // Injected-frame loopback test.
+      // The DMA already consumed the IDF-queued frames (all OWN=0) before this
+      // handler runs, so poll demand with LM=1 finds no OWN=1 descriptors and
+      // never actually sends anything. We must inject a fresh frame ourselves.
       //
-      // MMC TX error registers (all read-clear on hardware; preload to see errors):
-      //   0x3FF6A150 = mmc_tx_underflow_error (underflow during frame TX)
-      //   0x3FF6A168 = mmc_tx_jabber_error    (frame >2048B / jabber timeout)
-      //   0x3FF6A16C = mmc_tx_framecount_g    (good frames only — no errors)
-      //   0x3FF6A170 = mmc_tx_pause_frames    (pause frames sent)
-      //   0x3FF6A174 = mmc_tx_vlan_g          (VLAN tagged good frames)
-      //   0x3FF6A178 = mmc_tx_osize_g         (oversized good frames)
-      //   0x3FF6A17C = mmc_tx_carrier_error   (carrier sense error)
-      //   NOTE: reading MMC regs clears them (sticky counters). Read once.
-      //
-      // MTL TX FIFO debug register (0x3FF6A908):
-      //   bit0 = txf_nempty (TX FIFO not empty)
-      //   bit1 = txf_aempty (TX FIFO almost empty)
-      //   bit4 = txf_full   (TX FIFO full)
+      // Strategy: stop DMA, build a minimal 64-byte Ethernet frame in a static
+      // buffer, point TX[0] at it with OWN=1 and FS+LS set, then restart with
+      // LM=1 (MAC loopback). The DMA sends it and the MAC loops it back to RX.
+      // If MMC_TX increments, MAC TX works. If not, it's truly broken.
       {
-        // Pre-read MMC_CTRL to check if counters are frozen
-        Serial.printf("ETH: loopback test -- MAC_CR=0x%08x  MMC_TX=%u  TS_CTRL=0x%08x\n",
-                      REG_READ(0x3FF6A000), REG_READ(0x3FF6A118), REG_READ(0x3FF6A700));
-        Serial.printf("ETH:   MMC_CTRL=0x%08x  MTL_TXFIFO_DBG=0x%08x  FLOW=0x%08x\n",
-                      REG_READ(0x3FF6A100), REG_READ(0x3FF6A908), REG_READ(0x3FF6A018));
-        // Clear any stale MMC counters (read to clear)
-        (void)REG_READ(0x3FF6A118);  // gb_frames
-        (void)REG_READ(0x3FF6A150);  // underflow
-        (void)REG_READ(0x3FF6A168);  // jabber
-        (void)REG_READ(0x3FF6A16C);  // good frames
-        (void)REG_READ(0x3FF6A178);  // carrier error
-        REG_SET_BIT(0x3FF6A000, BIT(12));  // LM=1: enable MII loopback
-        delayMicroseconds(200);
+        static uint8_t lb_buf[64] __attribute__((aligned(4)));
+        // Build a minimal broadcast frame: dst=FF:FF:FF:FF:FF:FF, src=our MAC,
+        // EtherType=0x0800, payload=zeros.  CRC appended by MAC (DC=0).
+        memset(lb_buf, 0, sizeof(lb_buf));
+        // dst MAC
+        lb_buf[0]=0xff; lb_buf[1]=0xff; lb_buf[2]=0xff;
+        lb_buf[3]=0xff; lb_buf[4]=0xff; lb_buf[5]=0xff;
+        // src MAC (read from hardware register)
+        uint32_t mac_lo = REG_READ(0x3FF6A044);  // MACA0LR
+        uint32_t mac_hi = REG_READ(0x3FF6A040);  // MACA0HR
+        lb_buf[6]  = (mac_lo >>  0) & 0xff;
+        lb_buf[7]  = (mac_lo >>  8) & 0xff;
+        lb_buf[8]  = (mac_lo >> 16) & 0xff;
+        lb_buf[9]  = (mac_lo >> 24) & 0xff;
+        lb_buf[10] = (mac_hi >>  0) & 0xff;
+        lb_buf[11] = (mac_hi >>  8) & 0xff;
+        lb_buf[12] = 0x08; lb_buf[13] = 0x00;  // EtherType IPv4
+
+        uint32_t tx_list = REG_READ(0x3FF69010);
+        Serial.printf("ETH: inject loopback -- TX_LIST=0x%08x  buf=0x%08x\n",
+                      tx_list, (uint32_t)lb_buf);
+
+        // Stop TX DMA
+        REG_CLR_BIT(0x3FF69018, BIT(13));  // ST=0
+        uint32_t t0 = millis();
+        while (((REG_READ(0x3FF69014)>>20)&7) != 0 && millis()-t0 < 20) {}
+        // Flush TX FIFO
+        REG_SET_BIT(0x3FF69018, BIT(20));
+        t0 = millis();
+        while ((REG_READ(0x3FF69018) & BIT(20)) && millis()-t0 < 20) {}
+
+        // Overwrite TX[0] descriptor to point at our buffer.
+        // Keep the same 8-word enhanced descriptor layout.
+        // TDES0: OWN=1, IC=0, LS=1, FS=1, DC=0, TTSE=0, all others 0
+        // TDES1: TBS1=64, TBS2=0
+        // TDES2: buf1 address
+        // TDES3: next descriptor (TX[1])
+        // TDES4..7: zero (no timestamp)
+        if (tx_list >= 0x3FF00000 && tx_list <= 0x3FFFFFFF) {
+          volatile uint32_t* d = (volatile uint32_t*)tx_list;
+          uint32_t next = d[3];  // preserve original next-desc pointer
+          d[4] = 0; d[5] = 0; d[6] = 0; d[7] = 0;  // clear timestamp words
+          d[2] = (uint32_t)lb_buf;
+          d[1] = 64;  // TBS1=64, TBS2=0
+          d[3] = next;
+          // Write TDES0 last: OWN=1, LS=1(bit29), FS=1(bit28)
+          d[0] = 0x80000000 | BIT(29) | BIT(28);  // OWN+LS+FS, DC=0, TTSE=0
+          Serial.printf("ETH: TX[0] injected: DES0=0x%08x DES1=0x%08x DES2=0x%08x DES3=0x%08x\n",
+                        d[0], d[1], d[2], d[3]);
+        }
+
+        // Clear stale MMC counts
+        (void)REG_READ(0x3FF6A118);
+        (void)REG_READ(0x3FF6A150);
+        (void)REG_READ(0x3FF6A168);
+        (void)REG_READ(0x3FF6A16C);
+        (void)REG_READ(0x3FF6A178);
+
+        // Enable loopback, restart DMA, issue poll demand
+        REG_SET_BIT(0x3FF6A000, BIT(12));  // LM=1
+        REG_SET_BIT(0x3FF69018, BIT(13));  // ST=1
         REG_WRITE(0x3FF69004, 1);           // poll demand
+
         uint32_t t_lb = millis();
-        uint32_t dbg_peak = 0, dbg_stall = 0;
-        uint32_t stall_count = 0;
-        uint32_t mtl_dbg_peak = 0;
+        uint32_t dbg_peak = 0, stall_count = 0, dbg_stall = 0;
         while (REG_READ(0x3FF6A118) == 0 && (millis() - t_lb < 1000)) {
           uint32_t d = REG_READ(0x3FF6A024);
-          uint32_t m = REG_READ(0x3FF6A908);
-          if (d > dbg_peak) { dbg_peak = d; mtl_dbg_peak = m; }
-          // Count how many samples have mtltfrcs=2 (waiting for TxStatus — PTP stall point)
+          if (d > dbg_peak) dbg_peak = d;
           if (((d >> 20) & 3) == 2) { stall_count++; dbg_stall = d; }
           delayMicroseconds(10);
         }
-        uint32_t mmc_lb     = REG_READ(0x3FF6A118);  // gb_frames (clears on read)
-        uint32_t mmc_uflow  = REG_READ(0x3FF6A150);  // underflow error
-        uint32_t mmc_jabber = REG_READ(0x3FF6A168);  // jabber error
-        uint32_t mmc_good   = REG_READ(0x3FF6A16C);  // good frames (no errors)
-        uint32_t mmc_carrier= REG_READ(0x3FF6A178);  // carrier error
-        uint32_t dbg_lb     = REG_READ(0x3FF6A024);
-        uint32_t mtl_dbg_lb = REG_READ(0x3FF6A908);
-        REG_CLR_BIT(0x3FF6A000, BIT(12));  // LM=0: disable loopback
-        Serial.printf("ETH: loopback done  MMC_TX_GB=%u  MMC_GOOD=%u  DBG_peak=0x%08x  DBG_final=0x%08x\n",
-                      mmc_lb, mmc_good, dbg_peak, dbg_lb);
-        Serial.printf("ETH:   peak(tpes=%d tfc=%d mtltfrcs=%d fifo_ne=%d)  MTL_DBG_peak=0x%08x  stall_count=%u\n",
-                      (int)((dbg_peak >> 16) & 1),
-                      (int)((dbg_peak >> 17) & 3),
-                      (int)((dbg_peak >> 20) & 7),   // 3-bit field [22:20]
-                      (int)((dbg_peak >> 24) & 1),
-                      mtl_dbg_peak,
-                      stall_count);
-        Serial.printf("ETH:   MTL_DBG(peak): txf_nempty=%d txf_aempty=%d txf_full=%d\n",
-                      (int)(mtl_dbg_peak & 1), (int)((mtl_dbg_peak>>1)&1), (int)((mtl_dbg_peak>>4)&1));
-        Serial.printf("ETH:   MTL_DBG(final): txf_nempty=%d  MTL_DBG=0x%08x\n",
-                      (int)(mtl_dbg_lb & 1), mtl_dbg_lb);
-        Serial.printf("ETH:   MMC errors: underflow=%u jabber=%u carrier=%u\n",
-                      mmc_uflow, mmc_jabber, mmc_carrier);
-        if (mmc_uflow > 0)
-          Serial.printf("ETH:   => UNDERFLOW: TX FIFO emptied before frame done -- DMA too slow\n");
-        if (mmc_jabber > 0)
-          Serial.printf("ETH:   => JABBER: frame exceeded max size/time\n");
-        if (mmc_carrier > 0)
-          Serial.printf("ETH:   => CARRIER ERROR: no carrier sense or collision\n");
-        if (stall_count > 0) {
-          Serial.printf("ETH:   STALL at mtltfrcs=2 (waiting TxStatus) -- PTP ack blocking TX\n");
-          Serial.printf("ETH:   stall_sample=0x%08x\n", dbg_stall);
+
+        uint32_t mmc_gb  = REG_READ(0x3FF6A118);
+        uint32_t mmc_ufl = REG_READ(0x3FF6A150);
+        uint32_t mmc_jab = REG_READ(0x3FF6A168);
+        uint32_t mmc_g   = REG_READ(0x3FF6A16C);
+        uint32_t mmc_car = REG_READ(0x3FF6A178);
+        uint32_t dbg_end = REG_READ(0x3FF6A024);
+        REG_CLR_BIT(0x3FF6A000, BIT(12));  // LM=0
+
+        // Read back TX[0] descriptor status
+        uint32_t des0_after = 0;
+        if (tx_list >= 0x3FF00000 && tx_list <= 0x3FFFFFFF) {
+          volatile uint32_t* d = (volatile uint32_t*)tx_list;
+          des0_after = d[0];
         }
-        Serial.printf("ETH: %s\n", (mmc_lb > 0 || mmc_good > 0)
+
+        Serial.printf("ETH: inject loopback done  MMC_GB=%u  MMC_GOOD=%u  DBG_peak=0x%08x\n",
+                      mmc_gb, mmc_g, dbg_peak);
+        Serial.printf("ETH:   peak(tpes=%d tfc=%d mtltfrcs=%d fifo_ne=%d)  stall=%u\n",
+                      (int)((dbg_peak>>16)&1), (int)((dbg_peak>>17)&3),
+                      (int)((dbg_peak>>20)&3), (int)((dbg_peak>>24)&1),
+                      stall_count);
+        Serial.printf("ETH:   TX[0] DES0 after=0x%08x  OWN=%d  ErrSummary=%d  Deferred=%d\n",
+                      des0_after, (int)(des0_after>>31),
+                      (int)((des0_after>>15)&1), (int)(des0_after&1));
+        Serial.printf("ETH:   TDES0 status bits: UflowErr=%d ExcDef=%d CollCnt=%d VLan=%d ExcColl=%d LateColl=%d NoCarr=%d LossCarr=%d\n",
+                      (int)((des0_after>>1)&1),(int)((des0_after>>2)&1),(int)((des0_after>>3)&0xf),
+                      (int)((des0_after>>7)&1),(int)((des0_after>>8)&1),(int)((des0_after>>9)&1),
+                      (int)((des0_after>>10)&1),(int)((des0_after>>11)&1));
+        Serial.printf("ETH:   MMC errors: underflow=%u jabber=%u carrier=%u\n",
+                      mmc_ufl, mmc_jab, mmc_car);
+        Serial.printf("ETH: %s\n", (mmc_gb > 0 || mmc_g > 0)
           ? "LOOPBACK OK: MAC TX works"
           : "LOOPBACK FAIL: MAC TX not completing frames");
       }
