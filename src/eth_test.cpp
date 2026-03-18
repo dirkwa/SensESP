@@ -161,8 +161,8 @@ void onEvent(arduino_event_id_t event) {
                     REG_READ(0x3FF6A700),
                     (int)((REG_READ(0x3FF69014)>>20)&7),
                     REG_READ(0x3FF69018));
-      // mii_clk_tx_en + mii_clk_rx_en
-      REG_SET_BIT(0x3FF69808, BIT(3) | BIT(4));
+      // Do NOT set mii_clk_tx_en/rx_en (bits 3,4) — those are for MII mode only.
+      // RMII external clock input only needs ext_en=1 (bit0), already set by IDF.
       Serial.printf("ETH: ex_clk_ctrl=0x%08x\n", REG_READ(0x3FF69808));
 
       // Injected-frame loopback test.
