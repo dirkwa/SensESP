@@ -334,18 +334,19 @@ void onEvent(arduino_event_id_t event) {
           ? "LOOPBACK OK: MAC TX works"
           : "LOOPBACK FAIL: MAC TX not completing frames");
 
-      // Raw MAC register scan: dump 0x3FF6A000..0x3FF6A060 to confirm actual offsets.
-      Serial.printf("ETH: MAC raw reg scan (0x3FF6A000-0x3FF6A060):\n");
-      for (int off = 0; off <= 0x60; off += 4) {
+      // Scan MMC counter region (0x3FF6A100-0x3FF6A200) to verify counter addresses.
+      // In standard GMAC: MMC_CTRL=+0x100, TX_GB=+0x118, RX_GB=+0x180.
+      // Write a test value to MMC_CTRL (+0x100) to verify it's writable.
+      Serial.printf("ETH: MMC region scan (MAC+0x100 to MAC+0x200):\n");
+      REG_WRITE(0x3FF6A100, 0x00000001);  // write CNTRST=1 to reset all MMC counters
+      delayMicroseconds(10);
+      for (int off = 0x100; off <= 0x200; off += 4) {
         uint32_t v = REG_READ(0x3FF6A000 + off);
-        Serial.printf("  MAC+0x%03x = 0x%08x\n", off, v);
+        if (v != 0) Serial.printf("  MMC+0x%03x = 0x%08x\n", off, v);
       }
-      // Also scan MAC TS area (0x3FF6A700)
-      Serial.printf("ETH: MAC TS area:\n");
-      for (int off = 0x700; off <= 0x720; off += 4) {
-        uint32_t v = REG_READ(0x3FF6A000 + off);
-        Serial.printf("  MAC+0x%03x = 0x%08x\n", off, v);
-      }
+      Serial.printf("ETH: MMC_CTRL after reset write=0x%08x\n", REG_READ(0x3FF6A100));
+      // MAC internal status: emaccstatus (+0x0D8) has link_speed and link_mode
+      Serial.printf("ETH: emaccstatus(+0x0D8)=0x%08x\n", REG_READ(0x3FF6A000+0xD8));
       }  // end inject block
 
       // Poll MAC_DEBUG, TX_BUF and MMC_TX rapidly for 5s to catch MAC TX activity.
