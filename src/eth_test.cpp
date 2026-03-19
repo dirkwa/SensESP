@@ -201,16 +201,17 @@ void onEvent(arduino_event_id_t event) {
                     REG_READ(0x3FF6A700),
                     (int)((REG_READ(0x3FF69014)>>20)&7),
                     REG_READ(0x3FF69018));
-      // Ensure RMII external clock input is properly configured:
-      // ex_clkout_conf (div_num/h_div_num) should be 0 in external input mode.
-      // ex_clk_ctrl: ext_en=1, int_en=0. ex_oscclk_conf: clk_sel=1.
+      // RMII clock fix: IDF only sets ext_en=1 for ETH_CLOCK_GPIO0_IN, but
+      // mii_clk_tx_en (bit3) may also be needed to gate the TX serializer clock.
+      // Try enabling it here to see if TX completes.
       Serial.printf("ETH: ex_clkout=0x%08x ex_oscclk=0x%08x ex_clk_ctrl=0x%08x ex_phyinf=0x%08x\n",
                     REG_READ(0x3FF69800), REG_READ(0x3FF69804),
                     REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
       // Clear clkout_conf: leftover div values from previous reset can interfere.
       REG_WRITE(0x3FF69800, 0x00000000);
-      // Ensure ext_en=1, int_en=0 (bit1 clear), mii_clk bits clear (RMII only)
-      REG_WRITE(0x3FF69808, 0x00000001);
+      // Set ext_en=1, int_en=0, mii_clk_tx_en=1 (bit3), mii_clk_rx_en=1 (bit4)
+      // Testing whether TX serializer needs these bits even in RMII external mode.
+      REG_WRITE(0x3FF69808, 0x00000019);  // ext_en=1, mii_clk_tx_en=1, mii_clk_rx_en=1
       // Ensure oscclk clk_sel=1 (external oscillator path)
       uint32_t oscclk = REG_READ(0x3FF69804);
       REG_WRITE(0x3FF69804, oscclk | BIT(24));
