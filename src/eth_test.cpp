@@ -91,20 +91,39 @@ void onEvent(arduino_event_id_t event) {
       break;
     }
     case ARDUINO_EVENT_ETH_CONNECTED: {
-      uint32_t mac_cr = REG_READ(0x3FF6A000);
+      // Correct MAC register offsets (base 0x3FF6A000):
+      //   +0x008 = gmacconfig  (TX_EN bit3, RX_EN bit2, DM bit11, FES bit14)
+      //   +0x018 = gmacfc      (flow control)
+      //   +0x01C = emacdebug   (MAC debug state)
+      //   +0x028 = gmaclpi_crs (pls bit17 = link status seen by MAC TX)
+      //   +0x038 = emacaddr0high, +0x03C = emacaddr0low
+      //   +0x010 = emacgmiiaddr (MDIO addr), +0x014 = emacmiidata
+      #define GMACCONFIG   0x3FF6A008
+      #define GMACFC       0x3FF6A018
+      #define EMACDEBUG    0x3FF6A01C
+      #define GMACLPI_CRS  0x3FF6A028
+      #define EMACADDR0H   0x3FF6A038
+      #define EMACADDR0L   0x3FF6A03C
+      #ifndef EMAC_GMIIADDR
+      #define EMAC_GMIIADDR 0x3FF6A010
+      #define EMAC_GMIIDATA 0x3FF6A014
+      #endif
+
+      uint32_t mac_cr = REG_READ(GMACCONFIG);
       Serial.printf("ETH: Link up  TX_LIST=0x%08x  RX_LIST=0x%08x  OP_MODE=0x%08x\n",
                     REG_READ(0x3FF69010), REG_READ(0x3FF6900C), REG_READ(0x3FF69018));
-      Serial.printf("ETH: MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)  FLOW=0x%08x\n",
+      Serial.printf("ETH: gmacconfig=0x%08x (TX=%d RX=%d DM=%d FES=%d)  FLOW=0x%08x\n",
                     mac_cr,
                     (int)((mac_cr >> 3) & 1),
                     (int)((mac_cr >> 2) & 1),
                     (int)((mac_cr >> 11) & 1),
                     (int)((mac_cr >> 14) & 1),
-                    REG_READ(0x3FF6A018));
-      #ifndef EMAC_GMIIADDR
-      #define EMAC_GMIIADDR 0x3FF6A010
-      #define EMAC_GMIIDATA 0x3FF6A014
-      #endif
+                    REG_READ(GMACFC));
+      // LPI control register: pls (bit17) = link status. If 0, MAC won't TX.
+      uint32_t lpi = REG_READ(GMACLPI_CRS);
+      Serial.printf("ETH: gmaclpi_crs=0x%08x  pls=%d (1=link ok, 0=MAC thinks link down)\n",
+                    lpi, (int)((lpi >> 17) & 1));
+
       auto mdio_rd = [](int reg) -> uint16_t {
         REG_WRITE(EMAC_GMIIADDR, (1<<11)|(reg<<6)|(0<<2)|(0<<1)|(1<<0));
         uint32_t t2 = millis(); while ((REG_READ(EMAC_GMIIADDR)&1) && (millis()-t2<10)) {}
@@ -121,48 +140,38 @@ void onEvent(arduino_event_id_t event) {
       Serial.printf("ETH: PHY PSCSR(31)=0x%04x  speed_ind=%d\n",
                     pscsr, (pscsr>>2)&7);
 
-      // MAC_STATUS (0x3FF6A0D8): reflects actual MAC operating speed/duplex.
-      // bit0=duplex (1=full), bits[2:1]=speed (0=2.5MHz/10M, 1=25MHz/100M, 2=125MHz/1G).
-      // If this reads 0x00000000, MAC thinks it's at 10Mbps half-duplex regardless
-      // of what MAC_CR says — this would cause TX clock mismatch and silent failure.
-      Serial.printf("ETH: MAC_STATUS=0x%08x (speed=%d duplex=%d) BEFORE mac_cr fix\n",
-                    REG_READ(0x3FF6A0D8),
-                    (int)((REG_READ(0x3FF6A0D8)>>1)&3),
-                    (int)(REG_READ(0x3FF6A0D8)&1));
-
-      // Force MAC_CR to 100Mbps full-duplex (FES=1 bit14, DM=1 bit11) in case the
-      // IDF failed to update it from PHY autoneg. Also read back MAC_STATUS after.
+      // Set pls=1 in gmaclpi_crs so MAC TX engine sees the link as up.
+      // Also ensure gmacconfig has FES=1 (100M) and DM=1 (full-duplex).
       {
-        uint32_t cr = REG_READ(0x3FF6A000);
-        // speed_ind=6 means 100BASE-TX full (LAN8720 PSCSR bits[4:2]=6 → 100F)
-        // Set FES=1 (bit14) and DM=1 (bit11).  Keep all other bits unchanged.
-        bool is_100 = (((pscsr >> 2) & 7) == 5 || ((pscsr >> 2) & 7) == 6);
-        bool is_full = (((pscsr >> 2) & 7) == 6 || ((pscsr >> 2) & 7) == 5);
+        // Set pls=1 (bit17): tell MAC TX the link is up
+        REG_SET_BIT(GMACLPI_CRS, BIT(17));
+        Serial.printf("ETH: gmaclpi_crs after pls=1: 0x%08x  pls=%d\n",
+                      REG_READ(GMACLPI_CRS), (int)((REG_READ(GMACLPI_CRS)>>17)&1));
+
+        // Fix gmacconfig speed/duplex from PHY autoneg result
+        uint32_t cr = REG_READ(GMACCONFIG);
         // LAN8720 PSCSR speed_ind: 1=10H, 5=100H, 6=100F, 2=10F
-        is_100  = (((pscsr>>2)&7)==5 || ((pscsr>>2)&7)==6);
-        is_full = (((pscsr>>2)&7)==6 || ((pscsr>>2)&7)==2);
+        bool is_100  = (((pscsr>>2)&7)==5 || ((pscsr>>2)&7)==6);
+        bool is_full = (((pscsr>>2)&7)==6 || ((pscsr>>2)&7)==2);
         if (is_100)  cr |= BIT(14); else cr &= ~BIT(14);
         if (is_full) cr |= BIT(11); else cr &= ~BIT(11);
-        Serial.printf("ETH: writing MAC_CR=0x%08x (FES=%d DM=%d)\n",
-                      cr, (int)((cr>>14)&1), (int)((cr>>11)&1));
-        REG_WRITE(0x3FF6A000, cr);
+        REG_WRITE(GMACCONFIG, cr);
         delayMicroseconds(100);
-        Serial.printf("ETH: MAC_STATUS=0x%08x (speed=%d duplex=%d) AFTER mac_cr fix\n",
-                      REG_READ(0x3FF6A0D8),
-                      (int)((REG_READ(0x3FF6A0D8)>>1)&3),
-                      (int)(REG_READ(0x3FF6A0D8)&1));
+        Serial.printf("ETH: gmacconfig after fix=0x%08x (FES=%d DM=%d TX=%d RX=%d)\n",
+                      REG_READ(GMACCONFIG),
+                      (int)((REG_READ(GMACCONFIG)>>14)&1),
+                      (int)((REG_READ(GMACCONFIG)>>11)&1),
+                      (int)((REG_READ(GMACCONFIG)>>3)&1),
+                      (int)((REG_READ(GMACCONFIG)>>2)&1));
       }
 
       // Clear MAC_TS_CTRL — IDF v5 sets TSENALL (bit13) during esp_eth_start().
-      Serial.printf("ETH: MAC_TS_CTRL before=0x%08x  FLOW=0x%08x\n",
-                    REG_READ(0x3FF6A700), REG_READ(0x3FF6A018));
+      Serial.printf("ETH: MAC_TS_CTRL before=0x%08x\n", REG_READ(0x3FF6A700));
       REG_WRITE(0x3FF6A700, 0x00000000);
       Serial.printf("ETH: MAC_TS_CTRL after =0x%08x  TX_STATE=%d  OP_MODE=0x%08x\n",
                     REG_READ(0x3FF6A700),
                     (int)((REG_READ(0x3FF69014)>>20)&7),
                     REG_READ(0x3FF69018));
-      // Do NOT set mii_clk_tx_en/rx_en (bits 3,4) — those are for MII mode only.
-      // RMII external clock input only needs ext_en=1 (bit0), already set by IDF.
       Serial.printf("ETH: ex_clk_ctrl=0x%08x\n", REG_READ(0x3FF69808));
 
       // Injected-frame loopback test.
@@ -183,8 +192,8 @@ void onEvent(arduino_event_id_t event) {
         lb_buf[0]=0xff; lb_buf[1]=0xff; lb_buf[2]=0xff;
         lb_buf[3]=0xff; lb_buf[4]=0xff; lb_buf[5]=0xff;
         // src MAC (read from hardware register)
-        uint32_t mac_lo = REG_READ(0x3FF6A044);  // MACA0LR
-        uint32_t mac_hi = REG_READ(0x3FF6A040);  // MACA0HR
+        uint32_t mac_lo = REG_READ(EMACADDR0L);  // emacaddr0low
+        uint32_t mac_hi = REG_READ(EMACADDR0H);  // emacaddr0high
         lb_buf[6]  = (mac_lo >>  0) & 0xff;
         lb_buf[7]  = (mac_lo >>  8) & 0xff;
         lb_buf[8]  = (mac_lo >> 16) & 0xff;
@@ -234,9 +243,9 @@ void onEvent(arduino_event_id_t event) {
         (void)REG_READ(0x3FF6A178);
 
         // Send frame for real (no loopback) — reset DMA to ring start, restart.
-        // LM=0: frame goes to wire. MMC_TX increments if MAC TX works.
+        // gmacconfig LM=bit12; ensure it's 0 (real TX, not loopback).
         // Writing TX_LIST while ST=0 resets the DMA fetch pointer to TX[0].
-        REG_CLR_BIT(0x3FF6A000, BIT(12));  // LM=0 (no loopback — real TX)
+        REG_CLR_BIT(GMACCONFIG, BIT(12));  // LM=0 (no loopback — real TX)
         REG_WRITE(0x3FF69010, tx_list);    // reset DMA pointer to TX[0]
         REG_SET_BIT(0x3FF69018, BIT(13));  // ST=1
         REG_WRITE(0x3FF69004, 1);           // poll demand
@@ -244,7 +253,7 @@ void onEvent(arduino_event_id_t event) {
         uint32_t t_lb = millis();
         uint32_t dbg_peak = 0, stall_count = 0, dbg_stall = 0;
         while (REG_READ(0x3FF6A118) == 0 && (millis() - t_lb < 1000)) {
-          uint32_t d = REG_READ(0x3FF6A024);
+          uint32_t d = REG_READ(EMACDEBUG);
           if (d > dbg_peak) dbg_peak = d;
           if (((d >> 20) & 3) == 2) { stall_count++; dbg_stall = d; }
           delayMicroseconds(10);
@@ -255,7 +264,7 @@ void onEvent(arduino_event_id_t event) {
         uint32_t mmc_jab = REG_READ(0x3FF6A168);
         uint32_t mmc_g   = REG_READ(0x3FF6A16C);
         uint32_t mmc_car = REG_READ(0x3FF6A178);
-        uint32_t dbg_end = REG_READ(0x3FF6A024);
+        uint32_t dbg_end = REG_READ(EMACDEBUG);
 
         // Read back TX[0] descriptor status
         uint32_t des0_after = 0;
@@ -400,10 +409,10 @@ void setup() {
   Serial.printf("ETH: DMA BUS_MODE=0x%08x (alt_desc=%d)  OP_MODE=0x%08x  STATUS=0x%08x\n",
                 REG_READ(0x3FF69000), (int)((REG_READ(0x3FF69000)>>7)&1),
                 REG_READ(0x3FF69018), REG_READ(0x3FF69014));
-  Serial.printf("ETH: MAC_CR=0x%08x (TX=%d RX=%d) after begin\n",
-                REG_READ(0x3FF6A000),
-                (int)((REG_READ(0x3FF6A000)>>3)&1),
-                (int)((REG_READ(0x3FF6A000)>>2)&1));
+  Serial.printf("ETH: gmacconfig=0x%08x (TX=%d RX=%d) after begin\n",
+                REG_READ(0x3FF6A008),
+                (int)((REG_READ(0x3FF6A008)>>3)&1),
+                (int)((REG_READ(0x3FF6A008)>>2)&1));
   // ETH.cpp calls ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS after esp_eth_start(),
   // which clears TTSE (bit30) from the DMA's TDES0 template. Verify here.
   Serial.printf("ETH: DMA TX_STATE=%d (should not be 6 after TTSE fix)\n",
@@ -434,9 +443,9 @@ void loop() {
     uint32_t dma_tx_buf  = REG_READ(0x3FF69050);  // dmatxcurraddr_buf
     uint32_t dma_rx_list = REG_READ(0x3FF6900C);
     uint32_t dma_rx_desc = REG_READ(0x3FF6904C);  // dmarxcurrdesc
-    uint32_t mac_cr    = REG_READ(0x3FF6A000);
-    uint32_t mac_debug = REG_READ(0x3FF6A024);  // emacdebug
-    uint32_t mac_intr  = REG_READ(0x3FF6A038);  // MAC interrupt status
+    uint32_t mac_cr    = REG_READ(0x3FF6A008);  // gmacconfig (real MAC CR)
+    uint32_t mac_debug = REG_READ(0x3FF6A01C);  // emacdebug (real MAC debug)
+    uint32_t mac_intr  = REG_READ(0x3FF6A030);  // emacints (MAC interrupt status)
     uint32_t phyinf_val = REG_READ(0x3FF6980C);
     uint32_t oscclk_val = REG_READ(0x3FF69804);
     Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x (clk_sel=%d)  clk_ctrl=0x%08x  phyinf=0x%08x (intf=%d need 4)\n",
@@ -475,10 +484,10 @@ void loop() {
                   (int)((mac_debug >> 20) & 7),   // mtltfrcs 3-bit [22:20]
                   (int)((mac_debug >> 24) & 1),
                   (int)((mac_debug >> 22) & 1));
-    Serial.printf("  MAC_STATUS=0x%08x (speed=%d need 1, duplex=%d need 1)\n",
-                  REG_READ(0x3FF6A0D8),
-                  (int)((REG_READ(0x3FF6A0D8)>>1)&3),
-                  (int)(REG_READ(0x3FF6A0D8)&1));
+    // gmaclpi_crs: pls=bit17 (link status seen by MAC TX engine)
+    uint32_t lpi_crs = REG_READ(0x3FF6A028);
+    Serial.printf("  gmaclpi_crs=0x%08x  pls=%d (1=MAC sees link up)\n",
+                  lpi_crs, (int)((lpi_crs>>17)&1));
     Serial.printf("  MAC_INTR=0x%08x  DMA_INTR_EN=0x%08x\n", mac_intr, REG_READ(0x3FF6901C));
     Serial.printf("  DMA TX_STATE=%d  OP_MODE=0x%08x  TX_LIST=0x%08x  TX_DESC=0x%08x  TX_BUF=0x%08x\n",
                   (int)((dma_status >> 20) & 0x7),
@@ -505,7 +514,7 @@ void loop() {
     Serial.printf("  DMA RX_LIST=0x%08x  RX_DESC=0x%08x\n", dma_rx_list, dma_rx_desc);
     Serial.printf("  DMA MISSED_FRAMES=0x%08x  dmatxcurraddr=0x%08x  dmarxcurraddr=0x%08x\n",
                   REG_READ(0x3FF69020), REG_READ(0x3FF69050), REG_READ(0x3FF69054));
-    Serial.printf("  MAC_CR=0x%08x (TX=%d RX=%d DM=%d FES=%d)  OP flush=%d sfwd=%d ST=%d SR=%d\n",
+    Serial.printf("  gmacconfig=0x%08x (TX=%d RX=%d DM=%d FES=%d)  OP flush=%d sfwd=%d ST=%d SR=%d\n",
                   mac_cr,
                   (int)((mac_cr >> 3) & 1),
                   (int)((mac_cr >> 2) & 1),
