@@ -286,10 +286,9 @@ void onEvent(arduino_event_id_t event) {
         (void)REG_READ(0x3FF6A16C);
         (void)REG_READ(0x3FF6A178);
 
-        // Send with MAC loopback (LM=1) to test TX without needing RMII clock feedback.
-        // If MMC_TX increments with LM=1 but not LM=0, the RMII TX clock path is broken.
-        // gmacconfig loopback=bit12.
-        REG_SET_BIT(GMACCONFIG, BIT(12));  // LM=1 (MAC loopback — no RMII needed)
+        // Send for real (LM=0) — mii_clk_tx_en is now set above.
+        // If MMC_GB > 0, the mii_clk_tx_en fix works.
+        REG_CLR_BIT(GMACCONFIG, BIT(12));  // LM=0 (real RMII TX)
         REG_WRITE(0x3FF69010, tx_list);    // reset DMA pointer to TX[0]
         REG_SET_BIT(0x3FF69018, BIT(13));  // ST=1
         REG_WRITE(0x3FF69004, 1);           // poll demand
