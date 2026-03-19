@@ -209,9 +209,8 @@ void onEvent(arduino_event_id_t event) {
                     REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
       // Clear clkout_conf: leftover div values from previous reset can interfere.
       REG_WRITE(0x3FF69800, 0x00000000);
-      // Set ext_en=1, int_en=0, mii_clk_tx_en=1 (bit3), mii_clk_rx_en=1 (bit4)
-      // Testing whether TX serializer needs these bits even in RMII external mode.
-      REG_WRITE(0x3FF69808, 0x00000019);  // ext_en=1, mii_clk_tx_en=1, mii_clk_rx_en=1
+      // Try ext_en=1 + clk_en=1 (bit5): may be needed to gate clock to TX serializer.
+      REG_WRITE(0x3FF69808, 0x00000021);  // ext_en=1, clk_en=1
       // Ensure oscclk clk_sel=1 (external oscillator path)
       uint32_t oscclk = REG_READ(0x3FF69804);
       REG_WRITE(0x3FF69804, oscclk | BIT(24));
