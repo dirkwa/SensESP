@@ -92,24 +92,32 @@ void onEvent(arduino_event_id_t event) {
     }
     case ARDUINO_EVENT_ETH_CONNECTED: {
       // Correct MAC register offsets (base 0x3FF6A000).
-      // struct emac_mac_dev_s layout (confirmed from IDF source + 2 reserved words at 0x008/0x00C):
+      // struct emac_mac_dev_t layout (confirmed from emac_mac_struct.h):
       //   +0x000 = gmacconfig  (TX bit3, RX bit2, duplex bit11, FES bit14, loopback bit12)
       //   +0x004 = gmacff
-      //   +0x008 = reserved
-      //   +0x00C = reserved
+      //   +0x008 = reserved_1008
+      //   +0x00C = reserved_100c
       //   +0x010 = emacgmiiaddr (MDIO addr)
       //   +0x014 = emacmiidata
       //   +0x018 = gmacfc      (flow control)
-      //   +0x01C = emacdebug   (MAC debug state)
-      //   +0x020 = pmt_csr
-      //   +0x024 = gmaclpi_crs (pls bit17 = link status seen by MAC TX)
-      //   +0x034 = emacaddr0high, +0x038 = emacaddr0low
+      //   +0x01C = reserved_101c
+      //   +0x020 = reserved_1020
+      //   +0x024 = emacdebug   (MAC debug state machine)
+      //   +0x028 = pmt_rwuffr
+      //   +0x02C = pmt_csr     (pwrdwn bit0, mgkpkten bit1, rwkpkten bit2)
+      //   +0x030 = gmaclpi_crs (pls bit17 = link status seen by MAC TX)
+      //   +0x034 = gmaclpitimerscontrol
+      //   +0x038 = emacints
+      //   +0x03C = emacintmask
+      //   +0x040 = emacaddr0high, +0x044 = emacaddr0low
       #define GMACCONFIG   0x3FF6A000
       #define GMACFC       0x3FF6A018
-      #define EMACDEBUG    0x3FF6A01C
-      #define GMACLPI_CRS  0x3FF6A024
-      #define EMACADDR0H   0x3FF6A034
-      #define EMACADDR0L   0x3FF6A038
+      #define EMACDEBUG    0x3FF6A024
+      #define PMT_RWUFFR   0x3FF6A028
+      #define PMT_CSR      0x3FF6A02C
+      #define GMACLPI_CRS  0x3FF6A030
+      #define EMACADDR0H   0x3FF6A040
+      #define EMACADDR0L   0x3FF6A044
       #ifndef EMAC_GMIIADDR
       #define EMAC_GMIIADDR 0x3FF6A010
       #define EMAC_GMIIDATA 0x3FF6A014
@@ -146,9 +154,8 @@ void onEvent(arduino_event_id_t event) {
       Serial.printf("ETH: PHY PSCSR(31)=0x%04x  speed_ind=%d\n",
                     pscsr, (pscsr>>2)&7);
 
-      // pmt_csr (MAC+0x020 = 0x3FF6A020): if PD (bit0) is set, the MAC TX engine
-      // is in power-down mode and will never transmit. Clear it unconditionally.
-      #define PMT_CSR 0x3FF6A020
+      // pmt_csr (MAC+0x02C = 0x3FF6A02C): if pwrdwn (bit0) is set, MAC RX drops
+      // frames and TX is gated. Clear by writing 0 (disables mgkpkten/rwkpkten too).
       {
         uint32_t pmt = REG_READ(PMT_CSR);
         Serial.printf("ETH: pmt_csr=0x%08x  PD=%d MPFE=%d WFE=%d MPR=%d WFR=%d\n",
@@ -336,27 +343,28 @@ void onEvent(arduino_event_id_t event) {
                     (int)((REG_READ(0x3FF69018) >> 13) & 1),
                     (int)((REG_READ(0x3FF69018) >> 1) & 1));
       {
-        uint32_t last_txbuf = 0, last_status = 0, last_dbg01c = 0, last_dbg024 = 0, last_mmctx = 0;
+        uint32_t last_txbuf = 0, last_status = 0, last_dbg = 0, last_pmt = 0, last_lpi = 0, last_mmctx = 0;
         uint32_t t_poll = millis();
         while (millis() - t_poll < 5000) {
-          uint32_t txbuf   = REG_READ(0x3FF69050);
-          uint32_t status  = REG_READ(0x3FF69014);
-          uint32_t dbg01c  = REG_READ(0x3FF6A01C);  // emacdebug per struct
-          uint32_t dbg024  = REG_READ(0x3FF6A024);  // gmaclpi_crs per struct (may differ)
-          uint32_t mmctx   = REG_READ(0x3FF6A118);
-          if (txbuf != last_txbuf || status != last_status ||
-              dbg01c != last_dbg01c || dbg024 != last_dbg024 || mmctx != last_mmctx) {
-            Serial.printf("  t+%lums  TX_BUF=0x%08x  TX_ST=%d  01C=0x%08x  024=0x%08x  MMC=%u\n",
+          uint32_t txbuf  = REG_READ(0x3FF69050);
+          uint32_t status = REG_READ(0x3FF69014);
+          uint32_t dbg    = REG_READ(0x3FF6A024);  // emacdebug (confirmed)
+          uint32_t pmt    = REG_READ(0x3FF6A02C);  // pmt_csr (confirmed)
+          uint32_t lpi    = REG_READ(0x3FF6A030);  // gmaclpi_crs (confirmed)
+          uint32_t mmctx  = REG_READ(0x3FF6A118);
+          if (txbuf != last_txbuf || status != last_status || dbg != last_dbg ||
+              pmt != last_pmt || lpi != last_lpi || mmctx != last_mmctx) {
+            Serial.printf("  t+%lums  TX_BUF=0x%08x  TX_ST=%d  DBG=0x%08x  PMT=0x%08x(pd=%d)  LPI=0x%08x(pls=%d)  MMC=%u\n",
                           millis() - t_poll, txbuf, (int)((status >> 20) & 7),
-                          dbg01c, dbg024, mmctx);
-            last_txbuf = txbuf; last_status = status;
-            last_dbg01c = dbg01c; last_dbg024 = dbg024; last_mmctx = mmctx;
+                          dbg, pmt, (int)(pmt&1), lpi, (int)((lpi>>17)&1), mmctx);
+            last_txbuf = txbuf; last_status = status; last_dbg = dbg;
+            last_pmt = pmt; last_lpi = lpi; last_mmctx = mmctx;
           }
           delayMicroseconds(100);
         }
-        Serial.printf("ETH: poll done  TX_BUF=0x%08x  MMC_TX=%u  01C=0x%08x  024=0x%08x\n",
+        Serial.printf("ETH: poll done  TX_BUF=0x%08x  MMC_TX=%u  DBG=0x%08x  PMT=0x%08x  LPI=0x%08x\n",
                       REG_READ(0x3FF69050), REG_READ(0x3FF6A118),
-                      REG_READ(0x3FF6A01C), REG_READ(0x3FF6A024));
+                      REG_READ(0x3FF6A024), REG_READ(0x3FF6A02C), REG_READ(0x3FF6A030));
       }
       break;
     }
@@ -476,8 +484,8 @@ void loop() {
     uint32_t dma_rx_list = REG_READ(0x3FF6900C);
     uint32_t dma_rx_desc = REG_READ(0x3FF6904C);  // dmarxcurrdesc
     uint32_t mac_cr    = REG_READ(0x3FF6A000);  // gmacconfig
-    uint32_t mac_debug = REG_READ(0x3FF6A01C);  // emacdebug
-    uint32_t mac_intr  = REG_READ(0x3FF6A02C);  // emacints
+    uint32_t mac_debug = REG_READ(0x3FF6A024);  // emacdebug (confirmed from struct)
+    uint32_t mac_intr  = REG_READ(0x3FF6A038);  // emacints (confirmed from struct)
     uint32_t phyinf_val = REG_READ(0x3FF6980C);
     uint32_t oscclk_val = REG_READ(0x3FF69804);
     Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x (clk_sel=%d)  clk_ctrl=0x%08x  phyinf=0x%08x (intf=%d need 4)\n",
@@ -516,10 +524,11 @@ void loop() {
                   (int)((mac_debug >> 20) & 7),   // mtltfrcs 3-bit [22:20]
                   (int)((mac_debug >> 24) & 1),
                   (int)((mac_debug >> 22) & 1));
-    // gmaclpi_crs: pls=bit17 (link status seen by MAC TX engine)
-    uint32_t lpi_crs = REG_READ(0x3FF6A024);  // gmaclpi_crs
-    Serial.printf("  gmaclpi_crs=0x%08x  pls=%d (1=MAC sees link up)\n",
-                  lpi_crs, (int)((lpi_crs>>17)&1));
+    // pmt_csr and gmaclpi_crs (confirmed offsets from emac_mac_struct.h)
+    uint32_t pmt_val = REG_READ(0x3FF6A02C);  // pmt_csr: pwrdwn=bit0, mgkpkten=bit1, rwkpkten=bit2
+    uint32_t lpi_crs = REG_READ(0x3FF6A030);  // gmaclpi_crs: pls=bit17
+    Serial.printf("  pmt_csr=0x%08x  pwrdwn=%d  gmaclpi_crs=0x%08x  pls=%d (1=MAC sees link up)\n",
+                  pmt_val, (int)(pmt_val&1), lpi_crs, (int)((lpi_crs>>17)&1));
     Serial.printf("  MAC_INTR=0x%08x  DMA_INTR_EN=0x%08x\n", mac_intr, REG_READ(0x3FF6901C));
     Serial.printf("  DMA TX_STATE=%d  OP_MODE=0x%08x  TX_LIST=0x%08x  TX_DESC=0x%08x  TX_BUF=0x%08x\n",
                   (int)((dma_status >> 20) & 0x7),
