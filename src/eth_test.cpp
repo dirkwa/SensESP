@@ -91,19 +91,25 @@ void onEvent(arduino_event_id_t event) {
       break;
     }
     case ARDUINO_EVENT_ETH_CONNECTED: {
-      // Correct MAC register offsets (base 0x3FF6A000):
-      //   +0x008 = gmacconfig  (TX_EN bit3, RX_EN bit2, DM bit11, FES bit14)
+      // Correct MAC register offsets (base 0x3FF6A000).
+      // struct emac_mac_dev_s layout (confirmed from IDF source + 2 reserved words at 0x008/0x00C):
+      //   +0x000 = gmacconfig  (TX bit3, RX bit2, duplex bit11, FES bit14, loopback bit12)
+      //   +0x004 = gmacff
+      //   +0x008 = reserved
+      //   +0x00C = reserved
+      //   +0x010 = emacgmiiaddr (MDIO addr)
+      //   +0x014 = emacmiidata
       //   +0x018 = gmacfc      (flow control)
       //   +0x01C = emacdebug   (MAC debug state)
-      //   +0x028 = gmaclpi_crs (pls bit17 = link status seen by MAC TX)
-      //   +0x038 = emacaddr0high, +0x03C = emacaddr0low
-      //   +0x010 = emacgmiiaddr (MDIO addr), +0x014 = emacmiidata
-      #define GMACCONFIG   0x3FF6A008
+      //   +0x020 = pmt_csr
+      //   +0x024 = gmaclpi_crs (pls bit17 = link status seen by MAC TX)
+      //   +0x034 = emacaddr0high, +0x038 = emacaddr0low
+      #define GMACCONFIG   0x3FF6A000
       #define GMACFC       0x3FF6A018
       #define EMACDEBUG    0x3FF6A01C
-      #define GMACLPI_CRS  0x3FF6A028
-      #define EMACADDR0H   0x3FF6A038
-      #define EMACADDR0L   0x3FF6A03C
+      #define GMACLPI_CRS  0x3FF6A024
+      #define EMACADDR0H   0x3FF6A034
+      #define EMACADDR0L   0x3FF6A038
       #ifndef EMAC_GMIIADDR
       #define EMAC_GMIIADDR 0x3FF6A010
       #define EMAC_GMIIDATA 0x3FF6A014
@@ -410,9 +416,9 @@ void setup() {
                 REG_READ(0x3FF69000), (int)((REG_READ(0x3FF69000)>>7)&1),
                 REG_READ(0x3FF69018), REG_READ(0x3FF69014));
   Serial.printf("ETH: gmacconfig=0x%08x (TX=%d RX=%d) after begin\n",
-                REG_READ(0x3FF6A008),
-                (int)((REG_READ(0x3FF6A008)>>3)&1),
-                (int)((REG_READ(0x3FF6A008)>>2)&1));
+                REG_READ(0x3FF6A000),
+                (int)((REG_READ(0x3FF6A000)>>3)&1),
+                (int)((REG_READ(0x3FF6A000)>>2)&1));
   // ETH.cpp calls ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS after esp_eth_start(),
   // which clears TTSE (bit30) from the DMA's TDES0 template. Verify here.
   Serial.printf("ETH: DMA TX_STATE=%d (should not be 6 after TTSE fix)\n",
@@ -443,9 +449,9 @@ void loop() {
     uint32_t dma_tx_buf  = REG_READ(0x3FF69050);  // dmatxcurraddr_buf
     uint32_t dma_rx_list = REG_READ(0x3FF6900C);
     uint32_t dma_rx_desc = REG_READ(0x3FF6904C);  // dmarxcurrdesc
-    uint32_t mac_cr    = REG_READ(0x3FF6A008);  // gmacconfig (real MAC CR)
-    uint32_t mac_debug = REG_READ(0x3FF6A01C);  // emacdebug (real MAC debug)
-    uint32_t mac_intr  = REG_READ(0x3FF6A030);  // emacints (MAC interrupt status)
+    uint32_t mac_cr    = REG_READ(0x3FF6A000);  // gmacconfig
+    uint32_t mac_debug = REG_READ(0x3FF6A01C);  // emacdebug
+    uint32_t mac_intr  = REG_READ(0x3FF6A02C);  // emacints
     uint32_t phyinf_val = REG_READ(0x3FF6980C);
     uint32_t oscclk_val = REG_READ(0x3FF69804);
     Serial.printf("  EMAC_EX: clkout=0x%08x  oscclk=0x%08x (clk_sel=%d)  clk_ctrl=0x%08x  phyinf=0x%08x (intf=%d need 4)\n",
@@ -485,7 +491,7 @@ void loop() {
                   (int)((mac_debug >> 24) & 1),
                   (int)((mac_debug >> 22) & 1));
     // gmaclpi_crs: pls=bit17 (link status seen by MAC TX engine)
-    uint32_t lpi_crs = REG_READ(0x3FF6A028);
+    uint32_t lpi_crs = REG_READ(0x3FF6A024);  // gmaclpi_crs
     Serial.printf("  gmaclpi_crs=0x%08x  pls=%d (1=MAC sees link up)\n",
                   lpi_crs, (int)((lpi_crs>>17)&1));
     Serial.printf("  MAC_INTR=0x%08x  DMA_INTR_EN=0x%08x\n", mac_intr, REG_READ(0x3FF6901C));
