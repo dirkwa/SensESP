@@ -297,7 +297,20 @@ void onEvent(arduino_event_id_t event) {
         Serial.printf("ETH: %s\n", (mmc_gb > 0 || mmc_g > 0)
           ? "LOOPBACK OK: MAC TX works"
           : "LOOPBACK FAIL: MAC TX not completing frames");
+
+      // Raw MAC register scan: dump 0x3FF6A000..0x3FF6A060 to confirm actual offsets.
+      Serial.printf("ETH: MAC raw reg scan (0x3FF6A000-0x3FF6A060):\n");
+      for (int off = 0; off <= 0x60; off += 4) {
+        uint32_t v = REG_READ(0x3FF6A000 + off);
+        Serial.printf("  MAC+0x%03x = 0x%08x\n", off, v);
       }
+      // Also scan MAC TS area (0x3FF6A700)
+      Serial.printf("ETH: MAC TS area:\n");
+      for (int off = 0x700; off <= 0x720; off += 4) {
+        uint32_t v = REG_READ(0x3FF6A000 + off);
+        Serial.printf("  MAC+0x%03x = 0x%08x\n", off, v);
+      }
+      }  // end inject block
 
       // Poll MAC_DEBUG, TX_BUF and MMC_TX rapidly for 5s to catch MAC TX activity.
       // MAC_DEBUG bits [18:17] = mactfcs (TX frame controller state),
@@ -307,30 +320,27 @@ void onEvent(arduino_event_id_t event) {
                     (int)((REG_READ(0x3FF69018) >> 13) & 1),
                     (int)((REG_READ(0x3FF69018) >> 1) & 1));
       {
-        uint32_t last_txbuf = 0, last_status = 0, last_macdebug = 0, last_mmctx = 0;
+        uint32_t last_txbuf = 0, last_status = 0, last_dbg01c = 0, last_dbg024 = 0, last_mmctx = 0;
         uint32_t t_poll = millis();
         while (millis() - t_poll < 5000) {
-          uint32_t txbuf    = REG_READ(0x3FF69050);
-          uint32_t status   = REG_READ(0x3FF69014);
-          uint32_t macdebug = REG_READ(0x3FF6A024);
-          uint32_t mmctx    = REG_READ(0x3FF6A118);  // MMC TX gb_frames
+          uint32_t txbuf   = REG_READ(0x3FF69050);
+          uint32_t status  = REG_READ(0x3FF69014);
+          uint32_t dbg01c  = REG_READ(0x3FF6A01C);  // emacdebug per struct
+          uint32_t dbg024  = REG_READ(0x3FF6A024);  // gmaclpi_crs per struct (may differ)
+          uint32_t mmctx   = REG_READ(0x3FF6A118);
           if (txbuf != last_txbuf || status != last_status ||
-              macdebug != last_macdebug || mmctx != last_mmctx) {
-            Serial.printf("  t+%lums  TX_BUF=0x%08x  TX_ST=%d  DBG=0x%08x(tpes=%d tfc=%d fifo_ne=%d fifo_rd=%d)  MMC_TX=%u\n",
+              dbg01c != last_dbg01c || dbg024 != last_dbg024 || mmctx != last_mmctx) {
+            Serial.printf("  t+%lums  TX_BUF=0x%08x  TX_ST=%d  01C=0x%08x  024=0x%08x  MMC=%u\n",
                           millis() - t_poll, txbuf, (int)((status >> 20) & 7),
-                          macdebug,
-                          (int)((macdebug >> 16) & 1),   // mactpes
-                          (int)((macdebug >> 17) & 3),   // mactfcs
-                          (int)((macdebug >> 24) & 1),   // mtltfnes
-                          (int)((macdebug >> 20) & 7),   // mtltfrcs (3-bit field)
-                          mmctx);
+                          dbg01c, dbg024, mmctx);
             last_txbuf = txbuf; last_status = status;
-            last_macdebug = macdebug; last_mmctx = mmctx;
+            last_dbg01c = dbg01c; last_dbg024 = dbg024; last_mmctx = mmctx;
           }
           delayMicroseconds(100);
         }
-        Serial.printf("ETH: poll done  TX_BUF=0x%08x  MMC_TX=%u\n",
-                      REG_READ(0x3FF69050), REG_READ(0x3FF6A118));
+        Serial.printf("ETH: poll done  TX_BUF=0x%08x  MMC_TX=%u  01C=0x%08x  024=0x%08x\n",
+                      REG_READ(0x3FF69050), REG_READ(0x3FF6A118),
+                      REG_READ(0x3FF6A01C), REG_READ(0x3FF6A024));
       }
       break;
     }
