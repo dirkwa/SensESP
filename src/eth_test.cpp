@@ -146,6 +146,22 @@ void onEvent(arduino_event_id_t event) {
       Serial.printf("ETH: PHY PSCSR(31)=0x%04x  speed_ind=%d\n",
                     pscsr, (pscsr>>2)&7);
 
+      // pmt_csr (MAC+0x020 = 0x3FF6A020): if PD (bit0) is set, the MAC TX engine
+      // is in power-down mode and will never transmit. Clear it unconditionally.
+      #define PMT_CSR 0x3FF6A020
+      {
+        uint32_t pmt = REG_READ(PMT_CSR);
+        Serial.printf("ETH: pmt_csr=0x%08x  PD=%d MPFE=%d WFE=%d MPR=%d WFR=%d\n",
+                      pmt, (int)(pmt&1), (int)((pmt>>1)&1), (int)((pmt>>2)&1),
+                      (int)((pmt>>4)&1), (int)((pmt>>8)&1));
+        if (pmt & 1) {
+          Serial.printf("ETH: MAC power-down active! Clearing PMT_CSR PD bit.\n");
+          REG_WRITE(PMT_CSR, 0x00000000);
+          delayMicroseconds(100);
+          Serial.printf("ETH: pmt_csr after clear=0x%08x\n", REG_READ(PMT_CSR));
+        }
+      }
+
       // Set pls=1 in gmaclpi_crs so MAC TX engine sees the link as up.
       // Also ensure gmacconfig has FES=1 (100M) and DM=1 (full-duplex).
       {
