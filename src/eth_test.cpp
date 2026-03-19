@@ -201,7 +201,21 @@ void onEvent(arduino_event_id_t event) {
                     REG_READ(0x3FF6A700),
                     (int)((REG_READ(0x3FF69014)>>20)&7),
                     REG_READ(0x3FF69018));
-      Serial.printf("ETH: ex_clk_ctrl=0x%08x\n", REG_READ(0x3FF69808));
+      // Ensure RMII external clock input is properly configured:
+      // ex_clkout_conf (div_num/h_div_num) should be 0 in external input mode.
+      // ex_clk_ctrl: ext_en=1, int_en=0. ex_oscclk_conf: clk_sel=1.
+      Serial.printf("ETH: ex_clkout=0x%08x ex_oscclk=0x%08x ex_clk_ctrl=0x%08x ex_phyinf=0x%08x\n",
+                    REG_READ(0x3FF69800), REG_READ(0x3FF69804),
+                    REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
+      // Clear clkout_conf: leftover div values from previous reset can interfere.
+      REG_WRITE(0x3FF69800, 0x00000000);
+      // Ensure ext_en=1, int_en=0 (bit1 clear), mii_clk bits clear (RMII only)
+      REG_WRITE(0x3FF69808, 0x00000001);
+      // Ensure oscclk clk_sel=1 (external oscillator path)
+      uint32_t oscclk = REG_READ(0x3FF69804);
+      REG_WRITE(0x3FF69804, oscclk | BIT(24));
+      Serial.printf("ETH: after clk fix: clkout=0x%08x clk_ctrl=0x%08x oscclk=0x%08x\n",
+                    REG_READ(0x3FF69800), REG_READ(0x3FF69808), REG_READ(0x3FF69804));
 
       // Injected-frame loopback test.
       // The DMA already consumed the IDF-queued frames (all OWN=0) before this
@@ -271,10 +285,10 @@ void onEvent(arduino_event_id_t event) {
         (void)REG_READ(0x3FF6A16C);
         (void)REG_READ(0x3FF6A178);
 
-        // Send frame for real (no loopback) — reset DMA to ring start, restart.
-        // gmacconfig LM=bit12; ensure it's 0 (real TX, not loopback).
-        // Writing TX_LIST while ST=0 resets the DMA fetch pointer to TX[0].
-        REG_CLR_BIT(GMACCONFIG, BIT(12));  // LM=0 (no loopback — real TX)
+        // Send with MAC loopback (LM=1) to test TX without needing RMII clock feedback.
+        // If MMC_TX increments with LM=1 but not LM=0, the RMII TX clock path is broken.
+        // gmacconfig loopback=bit12.
+        REG_SET_BIT(GMACCONFIG, BIT(12));  // LM=1 (MAC loopback — no RMII needed)
         REG_WRITE(0x3FF69010, tx_list);    // reset DMA pointer to TX[0]
         REG_SET_BIT(0x3FF69018, BIT(13));  // ST=1
         REG_WRITE(0x3FF69004, 1);           // poll demand
