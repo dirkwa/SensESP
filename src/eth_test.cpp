@@ -40,20 +40,15 @@ static bool eth_connected = false;
 void onEvent(arduino_event_id_t event) {
   switch (event) {
     case ARDUINO_EVENT_ETH_START: {
-      // The real IOMUX fix is in lib/Ethernet/ETH.cpp: it re-applies GPIO0
-      // IOMUX immediately after perimanClearPinBus(), before DMA init runs.
-      // This event fires after esp_eth_start() returns (DMA already running),
-      // so this re-apply is just a safety belt.
+#if ETH_CLK_MODE_NUM == 0  // GPIO0_IN only: re-apply IOMUX after perimanClearPinBus()
       esp_gpio_revoke(BIT64(GPIO_NUM_0));
       REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
       PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
       CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-      // For RMII external clock input: IDF only sets ext_en (bit0), int_en=0.
-      // clk_en (bit5) is NOT set by IDF — removing it to test if it blocks TX.
       REG_WRITE(0x3FF69808, 0x01);  // ext_en=1 only
-      // ex_oscclk_conf.clk_sel (bit24) must be 1 for external GPIO0 clock.
-      REG_SET_BIT(0x3FF69804, BIT(24));
+      REG_SET_BIT(0x3FF69804, BIT(24));  // clk_sel=1
+#endif
       Serial.printf("ETH: Started (IOMUX MCU_SEL=%d need 5, clk_ctrl=0x%08x oscclk=0x%08x)\n",
                     (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
                     REG_READ(0x3FF69808), REG_READ(0x3FF69804));
@@ -218,20 +213,18 @@ void onEvent(arduino_event_id_t event) {
                     REG_READ(0x3FF6A700),
                     (int)((REG_READ(0x3FF69014)>>20)&7),
                     REG_READ(0x3FF69018));
-      // RMII clock fix: IDF only sets ext_en=1 for ETH_CLOCK_GPIO0_IN, but
-      // mii_clk_tx_en (bit3) may also be needed to gate the TX serializer clock.
-      // Try enabling it here to see if TX completes.
       Serial.printf("ETH: ex_clkout=0x%08x ex_oscclk=0x%08x ex_clk_ctrl=0x%08x ex_phyinf=0x%08x\n",
                     REG_READ(0x3FF69800), REG_READ(0x3FF69804),
                     REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
-      // Clear clkout_conf: leftover div values from previous reset can interfere.
-      REG_WRITE(0x3FF69800, 0x00000000);
-      // Try ext_en=1 + clk_en=1 (bit5): may be needed to gate clock to TX serializer.
+#if ETH_CLK_MODE_NUM == 0  // GPIO0_IN: override clock config
+      REG_WRITE(0x3FF69800, 0x00000000);  // clear clkout_conf
       REG_WRITE(0x3FF69808, 0x00000021);  // ext_en=1, clk_en=1
-      // Ensure oscclk clk_sel=1 (external oscillator path)
-      uint32_t oscclk = REG_READ(0x3FF69804);
-      REG_WRITE(0x3FF69804, oscclk | BIT(24));
-      Serial.printf("ETH: after clk fix: clkout=0x%08x clk_ctrl=0x%08x oscclk=0x%08x\n",
+      {
+        uint32_t oscclk = REG_READ(0x3FF69804);
+        REG_WRITE(0x3FF69804, oscclk | BIT(24));  // clk_sel=1
+      }
+#endif
+      Serial.printf("ETH: after clk check: clkout=0x%08x clk_ctrl=0x%08x oscclk=0x%08x\n",
                     REG_READ(0x3FF69800), REG_READ(0x3FF69808), REG_READ(0x3FF69804));
 
       // Injected-frame loopback test.
@@ -462,14 +455,14 @@ void setup() {
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
   Serial.println("ETH: PHY reset done");
 #elif ETH_CLK_MODE_NUM == 1  // ETH_CLOCK_GPIO0_OUT
-  // ESP32 generates 50MHz on GPIO0 via APLL. GPIO17 is free for PHY nRST.
-  // Pulse GPIO17 LOW to hardware-reset the LAN8720, then release.
+  // ESP32 generates 50MHz on GPIO0 via APLL. On the Aptinex board, GPIO0
+  // connects to the LAN8720 XI pin (REF_CLK input). The external oscillator
+  // is also gated by GPIO17 — keep it OFF to avoid bus contention on GPIO0.
+  // The LAN8720 will get its clock from the ESP32's GPIO0 output instead.
   pinMode(PHY_RST_PIN, OUTPUT);
-  digitalWrite(PHY_RST_PIN, LOW);
-  delay(50);
-  digitalWrite(PHY_RST_PIN, HIGH);
-  delay(300);
-  Serial.println("ETH: GPIO0_OUT mode, PHY reset via GPIO17 done");
+  digitalWrite(PHY_RST_PIN, LOW);   // keep oscillator OFF (avoid GPIO0 contention)
+  delay(200);
+  Serial.println("ETH: GPIO0_OUT mode, oscillator OFF (GPIO17 LOW)");
 #else
   // Internal clock mode (GPIO16_OUT / GPIO17_OUT).
   Serial.println("ETH: using internal clock output mode");
