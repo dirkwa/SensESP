@@ -216,14 +216,13 @@ void onEvent(arduino_event_id_t event) {
       Serial.printf("ETH: ex_clkout=0x%08x ex_oscclk=0x%08x ex_clk_ctrl=0x%08x ex_phyinf=0x%08x\n",
                     REG_READ(0x3FF69800), REG_READ(0x3FF69804),
                     REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
-#if ETH_CLK_MODE_NUM == 0  // GPIO0_IN: override clock config
-      REG_WRITE(0x3FF69800, 0x00000000);  // clear clkout_conf
-      REG_WRITE(0x3FF69808, 0x00000021);  // ext_en=1, clk_en=1
+      // Enable ALL clock bits: ext_en + int_en + mii_clk_tx_en + mii_clk_rx_en + clk_en
+      // This is a shotgun approach: ensure every possible clock gate is open.
       {
-        uint32_t oscclk = REG_READ(0x3FF69804);
-        REG_WRITE(0x3FF69804, oscclk | BIT(24));  // clk_sel=1
+        uint32_t clk = REG_READ(0x3FF69808);
+        clk |= BIT(0) | BIT(1) | BIT(3) | BIT(4) | BIT(5);  // ext+int+tx+rx+clk_en
+        REG_WRITE(0x3FF69808, clk);
       }
-#endif
       Serial.printf("ETH: after clk check: clkout=0x%08x clk_ctrl=0x%08x oscclk=0x%08x\n",
                     REG_READ(0x3FF69800), REG_READ(0x3FF69808), REG_READ(0x3FF69804));
 
