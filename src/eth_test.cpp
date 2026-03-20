@@ -454,9 +454,18 @@ void setup() {
   Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d (need 5)\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
   Serial.println("ETH: PHY reset done");
+#elif ETH_CLK_MODE == ETH_CLOCK_GPIO0_OUT
+  // ESP32 generates 50MHz on GPIO0 via APLL. GPIO17 is free for PHY nRST.
+  // Pulse GPIO17 LOW to hardware-reset the LAN8720, then release.
+  pinMode(PHY_RST_PIN, OUTPUT);
+  digitalWrite(PHY_RST_PIN, LOW);
+  delay(50);
+  digitalWrite(PHY_RST_PIN, HIGH);
+  delay(300);
+  Serial.println("ETH: GPIO0_OUT mode, PHY reset via GPIO17 done");
 #else
-  // Internal clock mode: IDF drives GPIO17 as clock output.
-  Serial.println("ETH: using internal clock on GPIO17");
+  // Internal clock mode (GPIO16_OUT / GPIO17_OUT).
+  Serial.println("ETH: using internal clock output mode");
 #endif
 
   WiFi.mode(WIFI_OFF);
