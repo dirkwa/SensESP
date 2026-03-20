@@ -28,6 +28,13 @@
 
 #define PHY_RST_PIN 17  // only used when ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
 
+// ETH_CLK_MODE is an enum value (not a preprocessor constant), so #if can't
+// compare against enum names. ETH_CLK_MODE_NUM is a numeric build flag for
+// preprocessor conditionals. Default to 0 (GPIO0_IN) if not defined.
+#ifndef ETH_CLK_MODE_NUM
+#define ETH_CLK_MODE_NUM 0
+#endif
+
 static bool eth_connected = false;
 
 void onEvent(arduino_event_id_t event) {
@@ -431,7 +438,7 @@ void setup() {
   esp_reset_reason_t reset_reason = esp_reset_reason();
   Serial.printf("\nAptinex IsolPoE ETH test starting... reset_reason=%d\n", (int)reset_reason);
 
-#if ETH_CLK_MODE == 0  // ETH_CLOCK_GPIO0_IN
+#if ETH_CLK_MODE_NUM == 0  // ETH_CLOCK_GPIO0_IN
   // External oscillator mode: GPIO17 = oscillator enable + PHY nRST.
   delay(200);  // let GPIO0 strapping pin settle after cold boot
   // Enable oscillator (GPIO17 HIGH) — no PHY reset pulse. The LAN8720 comes up
@@ -454,7 +461,7 @@ void setup() {
   Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d (need 5)\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
   Serial.println("ETH: PHY reset done");
-#elif ETH_CLK_MODE == 1  // ETH_CLOCK_GPIO0_OUT
+#elif ETH_CLK_MODE_NUM == 1  // ETH_CLOCK_GPIO0_OUT
   // ESP32 generates 50MHz on GPIO0 via APLL. GPIO17 is free for PHY nRST.
   // Pulse GPIO17 LOW to hardware-reset the LAN8720, then release.
   pinMode(PHY_RST_PIN, OUTPUT);
