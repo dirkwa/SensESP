@@ -352,33 +352,47 @@ void onEvent(arduino_event_id_t event) {
       // Poll MAC_DEBUG, TX_BUF and MMC_TX rapidly for 5s to catch MAC TX activity.
       // MAC_DEBUG bits [18:17] = mactfcs (TX frame controller state),
       //   bit16=mactpes (TX protocol engine active), bit24=mtltfnes (FIFO not empty).
-      // MMC_TX gb_frames at 0x3FF6A118 increments on each transmitted frame.
-      Serial.printf("ETH: polling MAC_DEBUG+TX_BUF for 5s (ST=%d SR=%d)\n",
+      // Poll for 5s watching TX state and RX descriptor OWN bits.
+      // RX descriptor OWN=0 means the MAC wrote a received frame into it.
+      // If OWN never changes to 0, neither TX nor RX is reaching the wire.
+      Serial.printf("ETH: polling TX+RX for 5s (ST=%d SR=%d)\n",
                     (int)((REG_READ(0x3FF69018) >> 13) & 1),
                     (int)((REG_READ(0x3FF69018) >> 1) & 1));
       {
-        uint32_t last_txbuf = 0, last_status = 0, last_dbg = 0, last_pmt = 0, last_lpi = 0, last_mmctx = 0;
+        uint32_t rx_list = REG_READ(0x3FF6900C);
+        uint32_t last_txbuf = 0, last_status = 0, last_dbg = 0;
+        uint32_t last_rx0 = 0, last_rx1 = 0;
         uint32_t t_poll = millis();
         while (millis() - t_poll < 5000) {
           uint32_t txbuf  = REG_READ(0x3FF69050);
           uint32_t status = REG_READ(0x3FF69014);
-          uint32_t dbg    = REG_READ(0x3FF6A024);  // emacdebug (confirmed)
-          uint32_t pmt    = REG_READ(0x3FF6A02C);  // pmt_csr (confirmed)
-          uint32_t lpi    = REG_READ(0x3FF6A030);  // gmaclpi_crs (confirmed)
-          uint32_t mmctx  = REG_READ(0x3FF6A118);
+          uint32_t dbg    = REG_READ(0x3FF6A024);
+          // Read first two RX descriptors OWN bits
+          uint32_t rx0_des0 = (rx_list >= 0x3FF00000) ? *(volatile uint32_t*)rx_list : 0;
+          uint32_t rx1_des0 = (rx_list >= 0x3FF00000) ? *(volatile uint32_t*)(rx_list+0x20) : 0;
           if (txbuf != last_txbuf || status != last_status || dbg != last_dbg ||
-              pmt != last_pmt || lpi != last_lpi || mmctx != last_mmctx) {
-            Serial.printf("  t+%lums  TX_BUF=0x%08x  TX_ST=%d  DBG=0x%08x  PMT=0x%08x(pd=%d)  LPI=0x%08x(pls=%d)  MMC=%u\n",
+              rx0_des0 != last_rx0 || rx1_des0 != last_rx1) {
+            Serial.printf("  t+%lums  TX_BUF=0x%08x  TX_ST=%d  DBG=0x%08x  RX[0].OWN=%d  RX[1].OWN=%d\n",
                           millis() - t_poll, txbuf, (int)((status >> 20) & 7),
-                          dbg, pmt, (int)(pmt&1), lpi, (int)((lpi>>17)&1), mmctx);
+                          dbg, (int)(rx0_des0 >> 31), (int)(rx1_des0 >> 31));
             last_txbuf = txbuf; last_status = status; last_dbg = dbg;
-            last_pmt = pmt; last_lpi = lpi; last_mmctx = mmctx;
+            last_rx0 = rx0_des0; last_rx1 = rx1_des0;
           }
           delayMicroseconds(100);
         }
-        Serial.printf("ETH: poll done  TX_BUF=0x%08x  MMC_TX=%u  DBG=0x%08x  PMT=0x%08x  LPI=0x%08x\n",
-                      REG_READ(0x3FF69050), REG_READ(0x3FF6A118),
-                      REG_READ(0x3FF6A024), REG_READ(0x3FF6A02C), REG_READ(0x3FF6A030));
+        // Read RX[0] buffer to see if anything arrived
+        uint32_t rx0_des0 = (rx_list >= 0x3FF00000) ? *(volatile uint32_t*)rx_list : 0;
+        uint32_t rx0_des2 = (rx_list >= 0x3FF00000) ? *(volatile uint32_t*)(rx_list+8) : 0;
+        Serial.printf("ETH: poll done  RX[0] DES0=0x%08x OWN=%d  buf@0x%08x first 16: ",
+                      rx0_des0, (int)(rx0_des0>>31), rx0_des2);
+        if (rx0_des2 >= 0x3FF00000 && rx0_des2 <= 0x3FFFFFFF && !(rx0_des0>>31)) {
+          for (int i = 0; i < 16; i++) Serial.printf("%02x ", ((uint8_t*)rx0_des2)[i]);
+        } else {
+          Serial.printf("(OWN=1, no frame)");
+        }
+        Serial.printf("\n");
+        Serial.printf("ETH: poll done  TX_BUF=0x%08x  MMC_TX=%u  DBG=0x%08x\n",
+                      REG_READ(0x3FF69050), REG_READ(0x3FF6A118), REG_READ(0x3FF6A024));
       }
       break;
     }
