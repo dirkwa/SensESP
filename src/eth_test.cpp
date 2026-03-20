@@ -434,10 +434,15 @@ void setup() {
 #if ETH_CLK_MODE == ETH_CLOCK_GPIO0_IN
   // External oscillator mode: GPIO17 = oscillator enable + PHY nRST.
   delay(200);  // let GPIO0 strapping pin settle after cold boot
+  // Enable oscillator (GPIO17 HIGH) — no PHY reset pulse. The LAN8720 comes up
+  // from power-on reset on its own. Pulsing nRST removes the 50MHz oscillator
+  // briefly (GPIO17 is shared), which disrupts RMII REF_CLK and leaves the PHY
+  // in an energyon=0 state with a stale cached link (BMSR says link=1 but
+  // the RMII data bus is dead).
   pinMode(PHY_RST_PIN, OUTPUT);
   digitalWrite(PHY_RST_PIN, HIGH);
-  delay(100);
-  Serial.println("ETH: oscillator on");
+  delay(300);  // 300ms: oscillator startup + LAN8720 power-on reset (100ms min)
+  Serial.println("ETH: oscillator on, no PHY reset pulse");
 
   // Pre-apply GPIO0 IOMUX so the clock is present from the start.
   // lib/Ethernet/ETH.cpp re-applies it after perimanClearPinBus() resets it.
@@ -448,19 +453,6 @@ void setup() {
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
   Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d (need 5)\n",
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
-
-  // PHY reset: GPIO17 LOW also disables the 50MHz oscillator, which removes
-  // the RMII REF_CLK from GPIO0. Re-apply the IOMUX after the pulse.
-  digitalWrite(PHY_RST_PIN, LOW);
-  delay(10);
-  digitalWrite(PHY_RST_PIN, HIGH);
-  // Re-apply GPIO0 IOMUX after oscillator restart (clock was absent during reset)
-  esp_gpio_revoke(BIT64(GPIO_NUM_0));
-  REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
-  PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
-  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
-  CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-  delay(300);  // LAN8720 needs >100ms after nRST=HIGH before MDIO is ready
   Serial.println("ETH: PHY reset done");
 #else
   // Internal clock mode: IDF drives GPIO17 as clock output.
