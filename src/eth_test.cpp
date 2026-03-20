@@ -434,26 +434,32 @@ void setup() {
 #if ETH_CLK_MODE_NUM == 0  // ETH_CLOCK_GPIO0_IN
   // External oscillator mode: GPIO17 = oscillator enable + PHY nRST.
   delay(200);  // let GPIO0 strapping pin settle after cold boot
-  // Enable oscillator (GPIO17 HIGH) — no PHY reset pulse. The LAN8720 comes up
-  // from power-on reset on its own. Pulsing nRST removes the 50MHz oscillator
-  // briefly (GPIO17 is shared), which disrupts RMII REF_CLK and leaves the PHY
-  // in an energyon=0 state with a stale cached link (BMSR says link=1 but
-  // the RMII data bus is dead).
-  pinMode(PHY_RST_PIN, OUTPUT);
-  digitalWrite(PHY_RST_PIN, HIGH);
-  delay(300);  // 300ms: oscillator startup + LAN8720 power-on reset (100ms min)
-  Serial.println("ETH: oscillator on, no PHY reset pulse");
 
-  // Pre-apply GPIO0 IOMUX so the clock is present from the start.
-  // lib/Ethernet/ETH.cpp re-applies it after perimanClearPinBus() resets it.
+  // Pre-apply GPIO0 IOMUX BEFORE enabling oscillator so the 50MHz clock
+  // goes directly into the EMAC REF_CLK input, not through the GPIO matrix.
   esp_gpio_revoke(BIT64(GPIO_NUM_0));
   REG_SET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL, FUNC_GPIO0_EMAC_TX_CLK);
   PIN_INPUT_ENABLE(IO_MUX_GPIO0_REG);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PD);
   CLEAR_PERI_REG_MASK(IO_MUX_GPIO0_REG, FUN_PU);
-  Serial.printf("ETH: GPIO0 IOMUX set  MCU_SEL=%d (need 5)\n",
-                (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
-  Serial.println("ETH: PHY reset done");
+  // Ensure GPIO0 output is disabled — it must be input-only for external clock.
+  REG_CLR_BIT(GPIO_ENABLE_REG, BIT(0));  // disable GPIO0 output
+
+  // Enable oscillator + PHY reset: GPIO17 HIGH, wait for oscillator + PHY.
+  // Then pulse LOW for 10ms to reset PHY, then HIGH again.
+  // The oscillator stays off during the 10ms LOW pulse but recovers quickly.
+  pinMode(PHY_RST_PIN, OUTPUT);
+  digitalWrite(PHY_RST_PIN, HIGH);
+  delay(200);  // oscillator startup
+  digitalWrite(PHY_RST_PIN, LOW);
+  delay(10);   // PHY reset pulse (min 1µs per LAN8720 datasheet)
+  digitalWrite(PHY_RST_PIN, HIGH);
+  delay(200);  // oscillator restart + PHY init (100ms min)
+
+  Serial.printf("ETH: GPIO0 IOMUX MCU_SEL=%d (need 5), GPIO0_OE=%d (need 0)\n",
+                (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL),
+                (int)((REG_READ(GPIO_ENABLE_REG) >> 0) & 1));
+  Serial.println("ETH: oscillator on, PHY reset done");
 #elif ETH_CLK_MODE_NUM == 1  // ETH_CLOCK_GPIO0_OUT
   // ESP32 generates 50MHz on GPIO0 via APLL (feeds ESP32 EMAC REF_CLK).
   // The Aptinex board has a separate oscillator (gated by GPIO17) that feeds
