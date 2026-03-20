@@ -455,14 +455,17 @@ void setup() {
                 (int)REG_GET_FIELD(IO_MUX_GPIO0_REG, MCU_SEL));
   Serial.println("ETH: PHY reset done");
 #elif ETH_CLK_MODE_NUM == 1  // ETH_CLOCK_GPIO0_OUT
-  // ESP32 generates 50MHz on GPIO0 via APLL. On the Aptinex board, GPIO0
-  // connects to the LAN8720 XI pin (REF_CLK input). The external oscillator
-  // is also gated by GPIO17 — keep it OFF to avoid bus contention on GPIO0.
-  // The LAN8720 will get its clock from the ESP32's GPIO0 output instead.
+  // ESP32 generates 50MHz on GPIO0 via APLL (feeds ESP32 EMAC REF_CLK).
+  // The Aptinex board has a separate oscillator (gated by GPIO17) that feeds
+  // the LAN8720 XI pin directly — NOT via GPIO0. So we need the oscillator ON
+  // for the PHY to work, while the ESP32 generates its own REF_CLK on GPIO0.
+  // Pulse GPIO17 LOW briefly to reset the PHY, then HIGH to enable oscillator.
   pinMode(PHY_RST_PIN, OUTPUT);
-  digitalWrite(PHY_RST_PIN, LOW);   // keep oscillator OFF (avoid GPIO0 contention)
-  delay(200);
-  Serial.println("ETH: GPIO0_OUT mode, oscillator OFF (GPIO17 LOW)");
+  digitalWrite(PHY_RST_PIN, LOW);
+  delay(50);
+  digitalWrite(PHY_RST_PIN, HIGH);
+  delay(300);
+  Serial.println("ETH: GPIO0_OUT mode, oscillator ON, PHY reset done");
 #else
   // Internal clock mode (GPIO16_OUT / GPIO17_OUT).
   Serial.println("ETH: using internal clock output mode");
