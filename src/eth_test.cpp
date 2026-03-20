@@ -461,17 +461,14 @@ void setup() {
                 (int)((REG_READ(GPIO_ENABLE_REG) >> 0) & 1));
   Serial.println("ETH: oscillator on, PHY reset done");
 #elif ETH_CLK_MODE_NUM == 1  // ETH_CLOCK_GPIO0_OUT
-  // ESP32 generates 50MHz on GPIO0 via APLL (feeds ESP32 EMAC REF_CLK).
-  // The Aptinex board has a separate oscillator (gated by GPIO17) that feeds
-  // the LAN8720 XI pin directly — NOT via GPIO0. So we need the oscillator ON
-  // for the PHY to work, while the ESP32 generates its own REF_CLK on GPIO0.
-  // Pulse GPIO17 LOW briefly to reset the PHY, then HIGH to enable oscillator.
+  // ESP32 generates 50MHz on GPIO0 via APLL. On the Aptinex board, GPIO0
+  // connects to LAN8720 REFCLKO (pin 14). GPIO17 controls PHY power/nRST.
+  // Let IDF manage GPIO17 via power=17 parameter in ETH.begin().
+  // Pre-enable GPIO17 HIGH so oscillator runs and PHY has power before init.
   pinMode(PHY_RST_PIN, OUTPUT);
-  digitalWrite(PHY_RST_PIN, LOW);
-  delay(50);
   digitalWrite(PHY_RST_PIN, HIGH);
   delay(300);
-  Serial.println("ETH: GPIO0_OUT mode, oscillator ON, PHY reset done");
+  Serial.println("ETH: GPIO0_OUT mode, GPIO17 HIGH, IDF manages PHY power");
 #else
   // Internal clock mode (GPIO16_OUT / GPIO17_OUT).
   Serial.println("ETH: using internal clock output mode");
@@ -486,9 +483,13 @@ void setup() {
   Serial.printf("ETH: EMAC_EX clk_ctrl=0x%08x  phyinf=0x%08x (before begin)\n",
                 REG_READ(0x3FF69808), REG_READ(0x3FF6980C));
 
-  Serial.printf("ETH: calling ETH.begin clk_mode=%d\n", (int)ETH_CLK_MODE);
+  int power_pin = -1;
+#if ETH_CLK_MODE_NUM == 1  // GPIO0_OUT: IDF manages GPIO17 as PHY power/reset
+  power_pin = 17;
+#endif
+  Serial.printf("ETH: calling ETH.begin clk_mode=%d power=%d\n", (int)ETH_CLK_MODE, power_pin);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
-            -1, ETH_CLK_MODE);
+            power_pin, ETH_CLK_MODE);
 
   Serial.printf("ETH: after ETH.begin  TX_LIST=0x%08x  RX_LIST=0x%08x\n",
                 REG_READ(0x3FF69010), REG_READ(0x3FF6900C));
