@@ -148,11 +148,21 @@ void onEvent(arduino_event_id_t event) {
       uint16_t anar  = mdio_rd(4);
       uint16_t anlpar= mdio_rd(5);
       uint16_t pscsr = mdio_rd(31);  // Special Control/Status (LAN8720 reg31)
-      Serial.printf("ETH: PHY BMSR=0x%04x (link=%d aneg=%d)  BMCR=0x%04x\n",
-                    bmsr, (int)((bmsr>>2)&1), (int)((bmsr>>5)&1), bmcr);
+      uint16_t r17   = mdio_rd(17);  // Mode Control/Status (LAN8720 reg17)
+      uint16_t r18   = mdio_rd(18);  // SMII/RMII status (LAN8720 reg18)
+      uint16_t r30   = mdio_rd(30);  // Control Indication (LAN8720 reg30)
+      // Read BMSR twice — first read clears latched bits (link-down latch)
+      uint16_t bmsr2 = mdio_rd(1);
+      Serial.printf("ETH: PHY BMSR=0x%04x (link=%d aneg=%d) BMSR2=0x%04x(link=%d)  BMCR=0x%04x\n",
+                    bmsr, (int)((bmsr>>2)&1), (int)((bmsr>>5)&1),
+                    bmsr2, (int)((bmsr2>>2)&1), bmcr);
       Serial.printf("ETH: PHY ANAR=0x%04x  ANLPAR=0x%04x\n", anar, anlpar);
-      Serial.printf("ETH: PHY PSCSR(31)=0x%04x  speed_ind=%d\n",
-                    pscsr, (pscsr>>2)&7);
+      Serial.printf("ETH: PHY PSCSR(31)=0x%04x  speed_ind=%d\n", pscsr, (pscsr>>2)&7);
+      Serial.printf("ETH: PHY r17=0x%04x r18=0x%04x r30=0x%04x\n", r17, r18, r30);
+      // r17: bit10=edpwrdown, bit4=energyon, bit2=altint, r18: CRS/signal quality
+      // r30: bit5=REGEN (RMII REF_CLK output enable from PHY - must be 0 for input)
+      Serial.printf("ETH: PHY energyon=%d  r18_crs=%d  r30_REGEN=%d\n",
+                    (int)((r17>>4)&1), (int)((r18>>7)&1), (int)((r30>>5)&1));
 
       // pmt_csr (MAC+0x02C = 0x3FF6A02C): if pwrdwn (bit0) is set, MAC RX drops
       // frames and TX is gated. Clear by writing 0 (disables mgkpkten/rwkpkten too).
