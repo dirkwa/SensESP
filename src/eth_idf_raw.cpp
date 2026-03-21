@@ -71,8 +71,12 @@ void setup() {
   eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
   esp32_emac_config.smi_gpio.mdc_num = GPIO_NUM_23;
   esp32_emac_config.smi_gpio.mdio_num = GPIO_NUM_18;
-  esp32_emac_config.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
-  esp32_emac_config.clock_config.rmii.clock_gpio = EMAC_CLK_IN_GPIO;
+  // Use GPIO0_OUT mode: ESP32 APLL generates 50MHz on GPIO0.
+  // The Aptinex board's external oscillator also feeds the LAN8720 XI pin
+  // via GPIO17, so both clock sources are active. Green LED was flashing
+  // with this configuration in earlier tests.
+  esp32_emac_config.clock_config.rmii.clock_mode = EMAC_CLK_OUT;
+  esp32_emac_config.clock_config.rmii.clock_gpio = EMAC_APPL_CLK_OUT_GPIO;
 
   esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
   if (!mac) {
