@@ -45,14 +45,22 @@ void setup() {
   delay(200);
   Serial.println("\nRaw IDF ETH test starting...");
 
-  // Enable oscillator / PHY power via GPIO17
+  // GPIO17 controls oscillator enable AND LAN8720 nRST on the Aptinex board.
+  // In GPIO0_OUT mode, the ESP32 APLL generates 50MHz on GPIO0.
+  // Keep oscillator OFF (GPIO17 LOW) to avoid two clocks fighting on GPIO0.
+  // The LAN8720 will get its clock from GPIO0 if it's wired to CLKIN.
+  // Pulse HIGH briefly then LOW to ensure PHY gets a clean power-on reset.
   gpio_config_t io_conf = {};
   io_conf.pin_bit_mask = (1ULL << 17);
   io_conf.mode = GPIO_MODE_OUTPUT;
   gpio_config(&io_conf);
-  gpio_set_level(GPIO_NUM_17, 1);
-  delay(300);
-  Serial.println("ETH: GPIO17 HIGH (oscillator on)");
+  gpio_set_level(GPIO_NUM_17, 1);  // PHY power on + oscillator on
+  delay(100);
+  gpio_set_level(GPIO_NUM_17, 0);  // PHY reset + oscillator off
+  delay(50);
+  gpio_set_level(GPIO_NUM_17, 1);  // PHY out of reset, oscillator on
+  delay(300);                       // wait for PHY + oscillator
+  Serial.println("ETH: GPIO17 pulsed (PHY reset done, oscillator on)");
 
   // Initialize TCP/IP and event loop
   esp_err_t ret;

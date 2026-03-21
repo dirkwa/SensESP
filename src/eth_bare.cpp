@@ -34,17 +34,15 @@ void setup() {
   delay(200);
   Serial.println("\nBare ETH test starting...");
 
-  // Enable oscillator / PHY power via GPIO17
-  pinMode(17, OUTPUT);
-  digitalWrite(17, HIGH);
-  delay(300);
-
   WiFi.mode(WIFI_OFF);
   Network.onEvent(onEvent);
 
-  Serial.println("Calling ETH.begin()...");
+  // Pass power=17 so IDF manages GPIO17 as PHY power/reset pin.
+  // The factory Aptinex example uses ETH_PHY_POWER=17.
+  // Do NOT manually set GPIO17 — let the IDF handle the power sequence.
+  Serial.println("Calling ETH.begin(power=17)...");
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
-            -1, ETH_CLK_MODE);
+            17, ETH_CLK_MODE);
   Serial.println("ETH.begin() returned");
 }
 
