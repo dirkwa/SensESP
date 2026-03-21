@@ -8,7 +8,7 @@
 #define ETH_PHY_ADDR  1
 #define ETH_PHY_MDC   23
 #define ETH_PHY_MDIO  18
-#define ETH_PHY_POWER 17
+#define ETH_PHY_POWER -1
 #define ETH_CLK_MODE  ETH_CLOCK_GPIO0_IN
 
 #include <ETH.h>
@@ -45,6 +45,13 @@ void onEvent(arduino_event_id_t event) {
 
 void setup() {
   Serial.begin(115200);
+  // GPIO17 = oscillator enable on Aptinex board. Must be HIGH before ETH.begin()
+  // so the 50MHz clock is present during EMAC init. Do NOT pass power=17 to
+  // ETH.begin() — the IDF would pulse it LOW (PHY reset), killing the clock.
+  pinMode(17, OUTPUT);
+  digitalWrite(17, HIGH);
+  delay(500);  // wait for oscillator + PHY power-on reset
+  Serial.println("GPIO17 HIGH, oscillator on");
   Network.onEvent(onEvent);
   ETH.begin();
 }
