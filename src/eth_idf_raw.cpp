@@ -45,22 +45,8 @@ void setup() {
   delay(200);
   Serial.println("\nRaw IDF ETH test starting...");
 
-  // GPIO17 controls oscillator enable AND LAN8720 nRST on the Aptinex board.
-  // In GPIO0_OUT mode, the ESP32 APLL generates 50MHz on GPIO0.
-  // Keep oscillator OFF (GPIO17 LOW) to avoid two clocks fighting on GPIO0.
-  // The LAN8720 will get its clock from GPIO0 if it's wired to CLKIN.
-  // Pulse HIGH briefly then LOW to ensure PHY gets a clean power-on reset.
-  gpio_config_t io_conf = {};
-  io_conf.pin_bit_mask = (1ULL << 17);
-  io_conf.mode = GPIO_MODE_OUTPUT;
-  gpio_config(&io_conf);
-  gpio_set_level(GPIO_NUM_17, 1);  // PHY power on + oscillator on
-  delay(100);
-  gpio_set_level(GPIO_NUM_17, 0);  // PHY reset + oscillator off
-  delay(50);
-  gpio_set_level(GPIO_NUM_17, 1);  // PHY out of reset, oscillator on
-  delay(300);                       // wait for PHY + oscillator
-  Serial.println("ETH: GPIO17 pulsed (PHY reset done, oscillator on)");
+  // Don't touch GPIO17 — let the IDF PHY driver manage it via reset_gpio_num=17.
+  Serial.println("ETH: GPIO17 managed by IDF (reset_gpio_num=17)");
 
   // Initialize TCP/IP and event loop
   esp_err_t ret;
@@ -79,12 +65,9 @@ void setup() {
   eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
   esp32_emac_config.smi_gpio.mdc_num = GPIO_NUM_23;
   esp32_emac_config.smi_gpio.mdio_num = GPIO_NUM_18;
-  // Use GPIO0_OUT mode: ESP32 APLL generates 50MHz on GPIO0.
-  // The Aptinex board's external oscillator also feeds the LAN8720 XI pin
-  // via GPIO17, so both clock sources are active. Green LED was flashing
-  // with this configuration in earlier tests.
-  esp32_emac_config.clock_config.rmii.clock_mode = EMAC_CLK_OUT;
-  esp32_emac_config.clock_config.rmii.clock_gpio = EMAC_APPL_CLK_OUT_GPIO;
+  // Use GPIO0_IN (external clock input) — matches factory firmware config.
+  esp32_emac_config.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
+  esp32_emac_config.clock_config.rmii.clock_gpio = EMAC_CLK_IN_GPIO;
 
   esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
   if (!mac) {
@@ -95,7 +78,7 @@ void setup() {
   // PHY config
   eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
   phy_config.phy_addr = 1;
-  phy_config.reset_gpio_num = -1;  // no PHY reset pin managed by IDF
+  phy_config.reset_gpio_num = 17;  // GPIO17 = PHY power/reset (factory config)
 
   esp_eth_phy_t *phy = esp_eth_phy_new_lan87xx(&phy_config);
   if (!phy) {
