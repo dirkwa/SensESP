@@ -114,6 +114,17 @@ class SensESPApp : public SensESPBaseApp {
   }
 
   /**
+   * @brief The SensESP HTTP server instance.
+   *
+   * Exposed so downstream examples and user sketches can register
+   * their own REST handlers (e.g. debug / status endpoints specific
+   * to that application) alongside the built-in ones.
+   */
+  std::shared_ptr<HTTPServer>& get_http_server() {
+    return this->http_server_;
+  }
+
+  /**
    * @deprecated Use get_wifi_provisioner() instead. Kept as a
    * source-compatible alias since the legacy class name was Networking.
    */

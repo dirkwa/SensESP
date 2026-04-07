@@ -161,12 +161,24 @@ static uint8_t lookup_addr_type(const std::string& mac) {
 // task (which dispatches WS messages on its own FreeRTOS task).
 static SemaphoreHandle_t gatt_sessions_mutex;
 
+// Runtime counters exposed via /api/ble-gw/status so the gateway can
+// be debugged remotely (serial output is not available when the board
+// is PoE-only). All of these are integers written from a single task
+// per field, so no atomic is needed.
+static uint32_t scan_hit_count = 0;       // onResult callback invocations
+static uint32_t http_post_success = 0;    // HTTP 200 responses from server
+static uint32_t http_post_fail = 0;       // any non-200 / network error
+static uint32_t http_post_skipped = 0;    // pending_ads was empty at post time
+static unsigned long last_post_ms = 0;    // millis() of last POST attempt
+
 // ---------------------------------------------------------------------------
 // NimBLE scan callback
 // ---------------------------------------------------------------------------
 
 class BLEScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* device) override {
+    scan_hit_count++;
+
     BleAdvertisement adv;
     adv.mac = device->getAddress().toString();
     adv.name = device->haveName() ? device->getName() : "";
@@ -356,9 +368,12 @@ static void send_advertisements() {
 
   if (addr.isEmpty()) return;
 
+  last_post_ms = millis();
+
   xSemaphoreTake(ads_mutex, portMAX_DELAY);
   if (pending_ads.empty()) {
     xSemaphoreGive(ads_mutex);
+    http_post_skipped++;
     return;
   }
   auto ads = std::move(pending_ads);
@@ -400,14 +415,17 @@ static void send_advertisements() {
 
   int code = http.POST(body);
   if (code == 200) {
+    http_post_success++;
     ESP_LOGI("BLE-GW", "POST: forwarded %u device(s), heap=%u",
              (unsigned)ads.size(), ESP.getFreeHeap());
   } else if (code == 401 || code == 403) {
+    http_post_fail++;
     ESP_LOGW("BLE-GW", "POST: auth rejected (HTTP %d) — restarting SK connection", code);
     http.end();
     sk_ws_client->restart();
     return;
   } else {
+    http_post_fail++;
     ESP_LOGW("BLE-GW", "POST failed: HTTP %d, heap=%u", code, ESP.getFreeHeap());
   }
   http.end();
@@ -1011,10 +1029,13 @@ void setup() {
 
   sk_ws_client = sensesp_app->get_ws_client();
 
-  // Initialize BLE scanner
-  init_ble_scanner();
-
-  // React to SKWSClient connection state changes
+  // Attach the SK-WS-state observer BEFORE any blocking work in
+  // init_ble_scanner() (the C6 bring-up can take >1 s, which is long
+  // enough for SensESP's SK delta stream to connect to the server in
+  // the background and emit kSKWSConnected through its TaskQueueProducer
+  // polling loop — if we attached the observer AFTER that, the event
+  // would have already fired with no listener and init_custom_websocket()
+  // would never be called until the next connection cycle).
   sk_ws_client->connect_to(
       new LambdaConsumer<SKWSConnectionState>(
           [](SKWSConnectionState state) {
@@ -1028,6 +1049,29 @@ void setup() {
               closeAllGATTSessions();
             }
           }));
+
+  // Initialize BLE scanner. Must come AFTER the observer is attached,
+  // per the comment above.
+  init_ble_scanner();
+
+  // Belt-and-suspenders: if the SK WS already came up during
+  // init_ble_scanner() (it is a TaskQueueProducer that polls its
+  // cross-task queue every 990 µs, so an emit() we missed because no
+  // observer was attached at the time is gone for good), manually
+  // kick init_custom_websocket(). This covers the case where the
+  // saved SK server config (use_mdns=false + hardcoded address) lets
+  // the delta stream connect so fast that the race still happens
+  // despite the re-ordering above. On a cold first boot (no saved
+  // config, mDNS discovery needed) this branch is effectively
+  // unreachable because SK discovery takes longer than BLE init.
+  event_loop()->onDelay(500, []() {
+    if (sk_ws_client && sk_ws_client->is_connected() && !ble_ws_connected) {
+      ESP_LOGI("BLE-GW",
+               "SK already connected at setup completion — kicking BLE "
+               "gateway services manually");
+      init_custom_websocket();
+    }
+  });
 
   // Start HTTP POST in a background FreeRTOS task
   xTaskCreate(http_post_task, "http_post", 8192, NULL, 1, NULL);
@@ -1043,6 +1087,46 @@ void setup() {
   event_loop()->onRepeat(10, []() {
     gatt_loop();
   });
+
+  // Debug endpoint exposing the gateway's internal state over HTTP.
+  // Hit GET http://<gateway-ip>/api/ble-gw/status to see scan / POST
+  // / WS counters. Very helpful for diagnosing issues when the board
+  // is PoE-only and serial is not available.
+  auto ble_gw_status_handler = std::make_shared<HTTPRequestHandler>(
+      1 << HTTP_GET, "/api/ble-gw/status", [](httpd_req_t* req) {
+        JsonDocument doc;
+        doc["uptime_ms"] = (uint64_t)millis();
+        doc["heap_free"] = ESP.getFreeHeap();
+        doc["ble_initialized"] = (bool)ble_initialized;
+        doc["ble_ws_connected"] = (bool)ble_ws_connected;
+        doc["scan_is_scanning"] =
+            ble_initialized ? NimBLEDevice::getScan()->isScanning() : false;
+        doc["scan_hit_count"] = scan_hit_count;
+        doc["active_gatt_sessions"] = activeGATTCount();
+        doc["max_gatt_sessions"] = MAX_GATT_SESSIONS;
+        xSemaphoreTake(ads_mutex, portMAX_DELAY);
+        doc["pending_ads"] = (int)pending_ads.size();
+        xSemaphoreGive(ads_mutex);
+        xSemaphoreTake(addr_type_mutex, portMAX_DELAY);
+        doc["known_addr_types"] = (int)known_addr_types.size();
+        xSemaphoreGive(addr_type_mutex);
+        doc["http_post_success"] = http_post_success;
+        doc["http_post_fail"] = http_post_fail;
+        doc["http_post_skipped"] = http_post_skipped;
+        doc["last_post_ms_ago"] =
+            last_post_ms ? (unsigned long)(millis() - last_post_ms) : 0;
+        if (sk_ws_client) {
+          doc["sk_server_address"] = sk_ws_client->get_server_address();
+          doc["sk_server_port"] = sk_ws_client->get_server_port();
+          doc["sk_is_connected"] = sk_ws_client->is_connected();
+        }
+        String json;
+        serializeJson(doc, json);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, json.c_str());
+        return ESP_OK;
+      });
+  sensesp_app->get_http_server()->add_handler(ble_gw_status_handler);
 
   ESP_LOGI("BLE-GW", "Setup complete, heap=%u", ESP.getFreeHeap());
 }
