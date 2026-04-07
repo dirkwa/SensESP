@@ -170,6 +170,10 @@ static uint32_t http_post_success = 0;    // HTTP 200 responses from server
 static uint32_t http_post_fail = 0;       // any non-200 / network error
 static uint32_t http_post_skipped = 0;    // pending_ads was empty at post time
 static unsigned long last_post_ms = 0;    // millis() of last POST attempt
+static bool nimble_init_ok = false;       // NimBLEDevice::init("") return
+static bool scan_start_ok = false;        // last scan->start() return
+static uint32_t scan_watchdog_restarts = 0; // http_post_task watchdog kicks
+static uint32_t slave_fw_major = 0, slave_fw_minor = 0, slave_fw_patch = 0;
 
 // ---------------------------------------------------------------------------
 // NimBLE scan callback
@@ -452,7 +456,8 @@ static void http_post_task(void* param) {
     NimBLEScan* scan = NimBLEDevice::getScan();
     if (!scan->isScanning()) {
       ESP_LOGI("BLE-GW", "BLE scan stopped — restarting");
-      scan->start(0);
+      scan_start_ok = scan->start(0);
+      scan_watchdog_restarts++;
     }
 
     if (sk_ws_client && sk_ws_client->is_connected()) {
@@ -967,26 +972,50 @@ static void init_ble_scanner() {
              "v2.11.6 onto the C6.");
     return;
   }
-  uint32_t maj = 0, min = 0, pat = 0;
-  hostedGetSlaveVersion(&maj, &min, &pat);
+  hostedGetSlaveVersion(&slave_fw_major, &slave_fw_minor, &slave_fw_patch);
   ESP_LOGI("BLE-GW", "ESP-Hosted slave firmware: %u.%u.%u",
-           (unsigned)maj, (unsigned)min, (unsigned)pat);
+           (unsigned)slave_fw_major, (unsigned)slave_fw_minor,
+           (unsigned)slave_fw_patch);
 
-  NimBLEDevice::init("");
+  nimble_init_ok = NimBLEDevice::init("");
+  ESP_LOGI("BLE-GW", "NimBLEDevice::init() -> %d", (int)nimble_init_ok);
+  if (!nimble_init_ok) {
+    ESP_LOGE("BLE-GW",
+             "NimBLEDevice::init() failed. The ESP-Hosted BT controller "
+             "came up but NimBLE host initialisation did not — possibly a "
+             "slave/host version mismatch.");
+    return;
+  }
 
   NimBLEScan* scan = NimBLEDevice::getScan();
   // Static lifetime — NimBLEScan::setScanCallbacks() does not take
   // ownership of the pointer, it just stores it. Allocating with
   // `new` here would leak on every restart of the scanner.
   static BLEScanCallbacks scan_callbacks;
-  scan->setScanCallbacks(&scan_callbacks, true);
-  scan->setActiveScan(false);
+  scan->setScanCallbacks(&scan_callbacks, false);
+  // Active scan: send SCAN_REQ to each advertiser and request a
+  // SCAN_RSP. Devices whose passive ADV_IND packets don't include a
+  // scan-response-only payload are still picked up, and devices that
+  // only respond to active scans (surprisingly common) start showing
+  // up too. Passive scan had worked on bench during M2 testing but
+  // the on-board test on PoE shows zero hits; flip to active as the
+  // first easy win.
+  scan->setActiveScan(true);
   scan->setInterval(200);
   scan->setWindow(100);
-  scan->setDuplicateFilter(0);
-  scan->start(0);
-  esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
-  ESP_LOGI("BLE-GW", "BLE scan started");
+  scan->setDuplicateFilter(1);  // filter by address
+  // Keep NimBLE's own errors and warnings visible. Previously we
+  // suppressed these at ESP_LOG_WARN; the level is a compile-time
+  // gate via CONFIG_NIMBLE_CPP_LOG_LEVEL so runtime esp_log_level_set
+  // doesn't help much, but we can still avoid silencing the WARN
+  // stream that would show "scan already active" / "host reset" etc.
+  esp_log_level_set("NimBLEScan", ESP_LOG_INFO);
+  scan_start_ok = scan->start(0);
+  ESP_LOGI("BLE-GW", "scan->start(0) -> %d (active itvl=200 win=100)",
+           (int)scan_start_ok);
+  if (!scan_start_ok) {
+    ESP_LOGE("BLE-GW", "Failed to start BLE scan");
+  }
 
   // Mark the BLE stack as ready so the HTTP POST task and other
   // consumers know it is safe to touch NimBLE singletons.
@@ -1098,12 +1127,24 @@ void setup() {
         doc["uptime_ms"] = (uint64_t)millis();
         doc["heap_free"] = ESP.getFreeHeap();
         doc["ble_initialized"] = (bool)ble_initialized;
+        doc["nimble_init_ok"] = nimble_init_ok;
+        doc["scan_start_ok"] = scan_start_ok;
+        doc["scan_watchdog_restarts"] = scan_watchdog_restarts;
         doc["ble_ws_connected"] = (bool)ble_ws_connected;
-        doc["scan_is_scanning"] =
-            ble_initialized ? NimBLEDevice::getScan()->isScanning() : false;
+        if (ble_initialized) {
+          NimBLEScan* scan = NimBLEDevice::getScan();
+          doc["scan_is_scanning"] = scan->isScanning();
+          doc["ble_gap_disc_active"] = ble_gap_disc_active() ? true : false;
+        } else {
+          doc["scan_is_scanning"] = false;
+          doc["ble_gap_disc_active"] = false;
+        }
         doc["scan_hit_count"] = scan_hit_count;
         doc["active_gatt_sessions"] = activeGATTCount();
         doc["max_gatt_sessions"] = MAX_GATT_SESSIONS;
+        doc["slave_fw"] = String((unsigned)slave_fw_major) + "." +
+                          String((unsigned)slave_fw_minor) + "." +
+                          String((unsigned)slave_fw_patch);
         xSemaphoreTake(ads_mutex, portMAX_DELAY);
         doc["pending_ads"] = (int)pending_ads.size();
         xSemaphoreGive(ads_mutex);
