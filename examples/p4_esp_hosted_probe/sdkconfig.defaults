@@ -1,0 +1,28 @@
+# Project-specific IDF sdkconfig overrides.
+#
+# esp32-arduino requires a 1000 Hz FreeRTOS tick. The default IDF
+# config sets it to 100 Hz, which breaks the Arduino core's timing
+# assumptions at link time.
+CONFIG_FREERTOS_HZ=1000
+
+# Match the Waveshare ESP32-P4-WIFI6-POE-ETH board's 16 MB SPI flash.
+# Without this, IDF defaults to 2 MB and warns at configure time.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Use a custom partition table from min_spiffs.csv (same layout as the
+# Arduino default for this board, copied into the project root).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="min_spiffs.csv"
+
+# Enable Arduino-ESP32's built-in ESP-Hosted + NimBLE BLE integration.
+# This activates esp32-hal-hosted.c which ships hostedInitBLE() — it
+# handles SDIO pin config (from the variant's BOARD_SDIO_ESP_HOSTED_*
+# macros), esp_hosted_init(), esp_hosted_connect_to_slave(), and
+# esp_hosted_bt_controller_init/enable(). Without this define,
+# esp32-hal-hosted.c compiles to nothing.
+CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=y
+
+# Verbose info logs during first-boot probing so we can see what the
+# esp_hosted stack is doing during init.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

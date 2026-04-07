@@ -47,6 +47,25 @@ class SKWSClient : public FileSystemSaveable,
   const String get_server_address() const { return server_address_; }
   uint16_t get_server_port() const { return server_port_; }
 
+  /**
+   * @brief Currently-held SignalK auth token (Bearer JWT).
+   *
+   * Returned as a const reference to the internal field. Empty until
+   * the access-request flow has completed and the server has issued a
+   * token for this device. SensESP keeps the token across reboots in
+   * the WS client config (so a freshly booted device that has run
+   * before is already authorised).
+   *
+   * Useful for downstream integrations that need to make their own
+   * HTTP / WebSocket calls to the same SignalK server using the same
+   * authorisation context as the main SK delta stream — e.g. the
+   * BLE-provider gateway example, which speaks its own dual-channel
+   * protocol on `/signalk/v2/api/ble/gateway/*` and needs to send the
+   * same Bearer token in both the HTTP POST `Authorization` header
+   * and the WebSocket `?token=…` query parameter.
+   */
+  const String& get_auth_token() const { return auth_token_; }
+
   virtual bool to_json(JsonObject& root) override final;
   virtual bool from_json(const JsonObject& config) override final;
 
