@@ -63,14 +63,15 @@ struct EspHostedBluedroidBLEConfig {
   /// the corresponding provisioner implementation type.
   using ProvisionerType = EspHostedBluedroidBLE;
 
-  /// True for active scan (scanner solicits scan responses from
-  /// peers), false for passive (scanner only listens). Active
-  /// captures more information per advertiser but uses a bit more
-  /// bandwidth and battery on the scanned devices. Defaults to
-  /// active because the primary use case (gateway relaying
-  /// advertisements to signalk-server) wants as much data as
-  /// possible per peer.
-  bool active_scan = true;
+  /// False for passive scan (RX only), true for active (scanner
+  /// solicits scan responses from peers). Passive is the default
+  /// because active scan requires the C6 to TX SCAN_REQ over the
+  /// SDIO bridge, which is unreliable on current esp_hosted firmware
+  /// and causes intermittent advertisement silence. Most BLE
+  /// advertisers broadcast all useful data in the advertisement
+  /// itself — scan responses typically add only extra manufacturer
+  /// data that the gateway doesn't need.
+  bool active_scan = false;
 
   /// Scan interval in milliseconds. The controller schedules a scan
   /// window once per interval. ESPHome's known-working P4+C6
@@ -82,11 +83,11 @@ struct EspHostedBluedroidBLEConfig {
   uint32_t scan_interval_ms = 320;
 
   /// Scan window in milliseconds. Each interval, the scanner
-  /// listens for this many ms. ESPHome uses 30ms (48 BLE units),
-  /// giving ~9% duty cycle. This is enough to discover most
-  /// advertisers within a few seconds while keeping SDIO HCI
-  /// traffic manageable for the C6.
-  uint32_t scan_window_ms = 30;
+  /// listens for this many ms. At 160ms window / 320ms interval
+  /// (~50% duty cycle) the passive scanner discovers most
+  /// advertisers within seconds while keeping SDIO HCI traffic
+  /// manageable for the C6.
+  uint32_t scan_window_ms = 160;
 };
 
 /**

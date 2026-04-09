@@ -161,15 +161,6 @@ static void maybe_ota_c6_slave() {
 void setup() {
   SetupLogging(ESP_LOG_INFO);
 
-  // HCI verbose logging — see every command sent to C6 and every
-  // event received back. If LE Advertising Reports are present in
-  // HCI but not reaching GAP, the filter is in Bluedroid. If absent,
-  // the C6 is not sending them.
-  esp_log_level_set("BT_HCI", ESP_LOG_VERBOSE);
-  esp_log_level_set("vhci_drv", ESP_LOG_VERBOSE);
-  esp_log_level_set("transport", ESP_LOG_DEBUG);
-  esp_log_level_set("BT_BTM", ESP_LOG_DEBUG);
-
   // Check for staged C6 slave firmware and flash it before anything
   // else. This only runs when /spiffs/c6_fw.bin exists.
   maybe_ota_c6_slave();
