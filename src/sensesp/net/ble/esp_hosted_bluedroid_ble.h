@@ -74,14 +74,17 @@ struct EspHostedBluedroidBLEConfig {
 
   /// Scan interval in milliseconds. The controller schedules a scan
   /// window once per interval. ESPHome's known-working P4 config
-  /// uses 1100 ms; we default to the same value.
-  uint32_t scan_interval_ms = 1100;
+  /// uses 320 ms (512 BLE units); we default to the same value.
+  /// A conservative duty cycle avoids overwhelming the SDIO HCI
+  /// transport between the P4 host and C6 controller.
+  uint32_t scan_interval_ms = 320;
 
   /// Scan window in milliseconds. Each interval, the scanner
-  /// listens for this many ms. With window == interval the scanner
-  /// listens continuously; smaller windows save power at the cost
-  /// of missed advertisements. Defaults to match the interval.
-  uint32_t scan_window_ms = 1100;
+  /// listens for this many ms. ESPHome uses 30 ms (48 BLE units),
+  /// giving ~9% duty cycle. This is enough to discover most
+  /// advertisers within a few seconds while leaving headroom for
+  /// the C6's HCI transport buffers.
+  uint32_t scan_window_ms = 30;
 };
 
 /**
@@ -144,7 +147,7 @@ class EspHostedBluedroidBLE : public BLEProvisioner {
 
   // Cached scan parameters struct — must outlive the scan since
   // Bluedroid stores a reference during active scanning.
-  esp_ble_ext_scan_params_t scan_params_{};
+  esp_ble_scan_params_t scan_params_{};
 };
 
 }  // namespace sensesp

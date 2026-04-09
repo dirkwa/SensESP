@@ -143,25 +143,25 @@ EspHostedBluedroidBLE::EspHostedBluedroidBLE(
     return;
   }
 
-  // Build the extended-scan parameters struct. The IDF Bluedroid
-  // build for ESP32-P4 is configured with
-  // CONFIG_BT_BLE_50_FEATURES_SUPPORTED=y (the default for any
-  // non-ESP32 chip), which compiles out the legacy
-  // esp_ble_gap_set_scan_params / esp_ble_gap_start_scanning entry
-  // points entirely — only the extended-scan equivalents are
-  // linkable. We use those.
+  // Build the legacy scan parameters struct. We explicitly set
+  // CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y in sdkconfig.defaults so
+  // that the legacy esp_ble_gap_set_scan_params / start_scanning
+  // entry points are compiled in. ESPHome's working P4+C6
+  // bluetooth_proxy uses legacy scan exclusively — the C6 slave
+  // firmware may not correctly forward BLE 5.0 extended HCI
+  // commands over the SDIO bridge.
   const uint16_t itvl = ms_to_scan_units(config_.scan_interval_ms);
   const uint16_t win = ms_to_scan_units(config_.scan_window_ms);
   const esp_ble_scan_type_t type =
       config_.active_scan ? BLE_SCAN_TYPE_ACTIVE : BLE_SCAN_TYPE_PASSIVE;
 
   scan_params_ = {
+      .scan_type = type,
       .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
-      .filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
+      .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
+      .scan_interval = itvl,
+      .scan_window = win,
       .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE,
-      .cfg_mask = ESP_BLE_GAP_EXT_SCAN_CFG_UNCODE_MASK,
-      .uncoded_cfg = {.scan_type = type, .scan_interval = itvl, .scan_window = win},
-      .coded_cfg = {.scan_type = type, .scan_interval = 0, .scan_window = 0},
   };
 
   bt_stack_up_.store(true);
@@ -175,7 +175,7 @@ EspHostedBluedroidBLE::EspHostedBluedroidBLE(
 
 EspHostedBluedroidBLE::~EspHostedBluedroidBLE() {
   if (scanning_.load()) {
-    esp_ble_gap_stop_ext_scan();
+    esp_ble_gap_stop_scanning();
   }
   // Intentionally not calling esp_bluedroid_disable() / _deinit()
   // here. Arduino-ESP32's ETH teardown has a similar comment: the
@@ -196,11 +196,11 @@ bool EspHostedBluedroidBLE::start_scan() {
   }
 
   // Set scan params first. The actual scan start happens in the
-  // SCAN_PARAMS_COMPLETE event handler, to ensure the controller
+  // SCAN_PARAM_SET_COMPLETE event handler, to ensure the controller
   // has accepted the params before we try to start.
-  esp_err_t err = esp_ble_gap_set_ext_scan_params(&scan_params_);
+  esp_err_t err = esp_ble_gap_set_scan_params(&scan_params_);
   if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_ble_gap_set_ext_scan_params failed: %s",
+    ESP_LOGE(kTag, "esp_ble_gap_set_scan_params failed: %s",
              esp_err_to_name(err));
     return false;
   }
@@ -211,9 +211,9 @@ bool EspHostedBluedroidBLE::stop_scan() {
   if (!scanning_.load()) {
     return true;
   }
-  esp_err_t err = esp_ble_gap_stop_ext_scan();
+  esp_err_t err = esp_ble_gap_stop_scanning();
   if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_ble_gap_stop_ext_scan failed: %s",
+    ESP_LOGE(kTag, "esp_ble_gap_stop_scanning failed: %s",
              esp_err_to_name(err));
     return false;
   }
@@ -245,46 +245,50 @@ void EspHostedBluedroidBLE::gap_event_trampoline(
 void EspHostedBluedroidBLE::handle_gap_event(
     esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
   switch (event) {
-    case ESP_GAP_BLE_SET_EXT_SCAN_PARAMS_COMPLETE_EVT: {
-      if (param->set_ext_scan_params.status != ESP_BT_STATUS_SUCCESS) {
-        ESP_LOGE(kTag, "SET_EXT_SCAN_PARAMS failed, status=%d",
-                 param->set_ext_scan_params.status);
+    case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT: {
+      if (param->scan_param_cmpl.status != ESP_BT_STATUS_SUCCESS) {
+        ESP_LOGE(kTag, "SCAN_PARAM_SET failed, status=%d",
+                 param->scan_param_cmpl.status);
         return;
       }
       scan_params_set_.store(true);
-      // duration=0, period=0 → scan forever until stopped.
-      esp_err_t err = esp_ble_gap_start_ext_scan(0, 0);
+      // duration=0 → scan forever until stopped.
+      esp_err_t err = esp_ble_gap_start_scanning(0);
       if (err != ESP_OK) {
-        ESP_LOGE(kTag, "esp_ble_gap_start_ext_scan failed: %s",
+        ESP_LOGE(kTag, "esp_ble_gap_start_scanning failed: %s",
                  esp_err_to_name(err));
       }
       break;
     }
-    case ESP_GAP_BLE_EXT_SCAN_START_COMPLETE_EVT: {
-      if (param->ext_scan_start.status != ESP_BT_STATUS_SUCCESS) {
-        ESP_LOGE(kTag, "EXT_SCAN_START failed, status=%d",
-                 param->ext_scan_start.status);
+    case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT: {
+      if (param->scan_start_cmpl.status != ESP_BT_STATUS_SUCCESS) {
+        ESP_LOGE(kTag, "SCAN_START failed, status=%d",
+                 param->scan_start_cmpl.status);
         return;
       }
       scanning_.store(true);
-      ESP_LOGI(kTag, "Extended scan started");
+      ESP_LOGI(kTag, "BLE scan started");
       break;
     }
-    case ESP_GAP_BLE_EXT_SCAN_STOP_COMPLETE_EVT: {
+    case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT: {
       scanning_.store(false);
-      ESP_LOGI(kTag, "Extended scan stopped");
+      ESP_LOGI(kTag, "BLE scan stopped");
       break;
     }
-    case ESP_GAP_BLE_EXT_ADV_REPORT_EVT: {
-      const auto& r = param->ext_adv_report.params;
+    case ESP_GAP_BLE_SCAN_RESULT_EVT: {
+      const auto& r = param->scan_rst;
+      if (r.search_evt != ESP_GAP_SEARCH_INQ_RES_EVT) {
+        // Other sub-events (INQ_CMPL, DISC_RES, etc.) — ignore.
+        break;
+      }
       scan_hit_count_.fetch_add(1, std::memory_order_relaxed);
 
       BLEAdvertisement ad;
-      ad.address = format_bda(r.addr);
-      ad.address_type = static_cast<uint8_t>(r.addr_type);
+      ad.address = format_bda(r.bda);
+      ad.address_type = static_cast<uint8_t>(r.ble_addr_type);
       ad.rssi = r.rssi;
-      ad.name = extract_local_name(r.adv_data, r.adv_data_len);
-      ad.adv_data.assign(r.adv_data, r.adv_data + r.adv_data_len);
+      ad.name = extract_local_name(r.ble_adv, r.adv_data_len);
+      ad.adv_data.assign(r.ble_adv, r.ble_adv + r.adv_data_len);
       ad.received_at_ms = millis();
 
       // Emit through the inherited ValueProducer<BLEAdvertisement>
@@ -293,8 +297,6 @@ void EspHostedBluedroidBLE::handle_gap_event(
       break;
     }
     default:
-      // Many other events (adv-complete, period-sync, etc.) that we
-      // do not currently care about. Log at debug level only.
       ESP_LOGD(kTag, "Unhandled GAP event %d", static_cast<int>(event));
       break;
   }
