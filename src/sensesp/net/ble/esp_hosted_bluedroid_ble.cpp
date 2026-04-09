@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_bluedroid_hci.h"
+#include "esp_bt_device.h"
 #include "esp_log.h"
 
 // Arduino-ESP32 helper that brings the ESP-Hosted BT controller up.

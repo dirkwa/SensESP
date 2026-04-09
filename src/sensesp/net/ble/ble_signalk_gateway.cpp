@@ -310,9 +310,13 @@ void BLESignalKGateway::post_pending_advertisements() {
   String token = sk_client_->get_auth_token();
   String addr = sk_client_->get_server_address();
   uint16_t port = sk_client_->get_server_port();
-  if (addr.length() == 0 || port == 0 || token.length() == 0) {
+  if (addr.length() == 0 || port == 0) {
     return;
   }
+  // An empty token is valid when the server has security disabled
+  // (signalk-server returns 404 on access-request and SKWSClient
+  // proceeds without a token). In that case we still POST but
+  // without the Authorization header.
 
   // Drain the pending buffer under the mutex.
   std::vector<BLEAdvertisement> to_post;
@@ -351,7 +355,9 @@ void BLESignalKGateway::post_pending_advertisements() {
   HTTPClient http;
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + token);
+  if (token.length() > 0) {
+    http.addHeader("Authorization", String("Bearer ") + token);
+  }
   http.addHeader("Connection", "close");
   http.setTimeout(3000);
 
