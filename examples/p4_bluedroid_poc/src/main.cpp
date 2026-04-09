@@ -53,6 +53,16 @@
 #include "sensesp/net/ethernet_provisioner.h"
 #include "sensesp_app_builder.h"
 
+#include "SPIFFS.h"
+
+extern "C" {
+#include "esp32-hal-hosted.h"
+esp_err_t esp_hosted_slave_ota_begin(void);
+esp_err_t esp_hosted_slave_ota_write(uint8_t* data, uint32_t len);
+esp_err_t esp_hosted_slave_ota_end(void);
+esp_err_t esp_hosted_slave_ota_activate(void);
+}
+
 using namespace sensesp;
 
 // Kept alive for the lifetime of the app. The gateway keeps a
@@ -62,8 +72,107 @@ using namespace sensesp;
 static std::shared_ptr<EspHostedBluedroidBLE> g_ble;
 static std::shared_ptr<BLESignalKGateway> g_gateway;
 
+// One-shot C6 slave firmware OTA. If /spiffs/c6_fw.bin exists, push
+// it to the C6 via esp_hosted's OTA RPC, activate, and reboot. The
+// file is deleted after a successful flash so it only runs once.
+static void maybe_ota_c6_slave() {
+  if (!SPIFFS.begin(false, "/spiffs")) {
+    return;  // No SPIFFS — skip silently.
+  }
+  if (!SPIFFS.exists("/c6_fw.bin")) {
+    SPIFFS.end();
+    return;  // No firmware staged — normal boot.
+  }
+
+  ESP_LOGW("C6_OTA", "Found /spiffs/c6_fw.bin — starting C6 slave OTA");
+
+  // The hosted transport must be up before we can send OTA RPCs.
+  // hostedInit() is idempotent — if already initialized by an
+  // earlier call (e.g. hostedInitBLE), it returns true immediately.
+  if (!hostedInitBLE()) {
+    ESP_LOGE("C6_OTA", "hostedInitBLE failed — cannot OTA");
+    SPIFFS.end();
+    return;
+  }
+
+  File fw = SPIFFS.open("/c6_fw.bin", "r");
+  if (!fw) {
+    ESP_LOGE("C6_OTA", "Failed to open /spiffs/c6_fw.bin");
+    SPIFFS.end();
+    return;
+  }
+
+  size_t total = fw.size();
+  ESP_LOGI("C6_OTA", "Firmware size: %u bytes", (unsigned)total);
+
+  esp_err_t err = esp_hosted_slave_ota_begin();
+  if (err != ESP_OK) {
+    ESP_LOGE("C6_OTA", "ota_begin failed: %s", esp_err_to_name(err));
+    fw.close();
+    SPIFFS.end();
+    return;
+  }
+
+  uint8_t buf[1500];
+  size_t sent = 0;
+  while (fw.available()) {
+    size_t n = fw.read(buf, sizeof(buf));
+    err = esp_hosted_slave_ota_write(buf, n);
+    if (err != ESP_OK) {
+      ESP_LOGE("C6_OTA", "ota_write failed at offset %u: %s",
+               (unsigned)sent, esp_err_to_name(err));
+      fw.close();
+      SPIFFS.end();
+      return;
+    }
+    sent += n;
+    if (sent % (100 * 1500) < 1500) {
+      ESP_LOGI("C6_OTA", "Progress: %u / %u bytes", (unsigned)sent,
+               (unsigned)total);
+    }
+  }
+  fw.close();
+
+  ESP_LOGI("C6_OTA", "Sent %u bytes — finalizing OTA", (unsigned)sent);
+  err = esp_hosted_slave_ota_end();
+  if (err != ESP_OK) {
+    ESP_LOGE("C6_OTA", "ota_end failed: %s", esp_err_to_name(err));
+    SPIFFS.end();
+    return;
+  }
+
+  ESP_LOGI("C6_OTA", "Activating new C6 firmware");
+  err = esp_hosted_slave_ota_activate();
+  if (err != ESP_OK) {
+    ESP_LOGE("C6_OTA", "ota_activate failed: %s", esp_err_to_name(err));
+    SPIFFS.end();
+    return;
+  }
+
+  // Delete the firmware file so we don't OTA on every boot.
+  SPIFFS.remove("/c6_fw.bin");
+  SPIFFS.end();
+
+  ESP_LOGW("C6_OTA", "C6 slave firmware updated — rebooting in 2s");
+  delay(2000);
+  ESP.restart();
+}
+
 void setup() {
   SetupLogging(ESP_LOG_INFO);
+
+  // HCI verbose logging — see every command sent to C6 and every
+  // event received back. If LE Advertising Reports are present in
+  // HCI but not reaching GAP, the filter is in Bluedroid. If absent,
+  // the C6 is not sending them.
+  esp_log_level_set("BT_HCI", ESP_LOG_VERBOSE);
+  esp_log_level_set("vhci_drv", ESP_LOG_VERBOSE);
+  esp_log_level_set("transport", ESP_LOG_DEBUG);
+  esp_log_level_set("BT_BTM", ESP_LOG_DEBUG);
+
+  // Check for staged C6 slave firmware and flash it before anything
+  // else. This only runs when /spiffs/c6_fw.bin exists.
+  maybe_ota_c6_slave();
 
   SensESPAppBuilder builder;
   auto app = builder.set_hostname(GATEWAY_HOSTNAME)

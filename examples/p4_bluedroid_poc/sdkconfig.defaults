@@ -104,6 +104,7 @@ CONFIG_ESP_HOSTED_ENABLED=y
 CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID=y
 CONFIG_ESP_HOSTED_BLUEDROID_HCI_VHCI=y
 
+
 # ---------------------------------------------------------------------
 # Ethernet — keep the native P4 EMAC enabled, same as the Arduino
 # stock defaults but made explicit to survive sdkconfig regeneration.

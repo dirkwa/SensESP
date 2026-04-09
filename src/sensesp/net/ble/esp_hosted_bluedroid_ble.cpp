@@ -32,6 +32,14 @@ void hosted_hci_bluedroid_send(uint8_t* data, uint16_t len);
 bool hosted_hci_bluedroid_check_send_available(void);
 esp_err_t hosted_hci_bluedroid_register_host_callback(
     const esp_bluedroid_hci_driver_callbacks_t* callback);
+
+// esp_hosted BT controller lifecycle RPCs. These send RPC commands
+// over SDIO to the C6 slave to init/deinit/enable/disable its BT
+// controller. Available in esp_hosted >= 2.5.2.
+esp_err_t esp_hosted_bt_controller_init(void);
+esp_err_t esp_hosted_bt_controller_deinit(bool mem_release);
+esp_err_t esp_hosted_bt_controller_enable(void);
+esp_err_t esp_hosted_bt_controller_disable(void);
 }
 
 namespace sensesp {
@@ -218,6 +226,95 @@ bool EspHostedBluedroidBLE::stop_scan() {
     return false;
   }
   // scanning_ flag is cleared in the STOP_COMPLETE event handler.
+  return true;
+}
+
+bool EspHostedBluedroidBLE::reset_bt_controller() {
+  ESP_LOGW(kTag, "Resetting BT controller — full Bluedroid + C6 restart");
+
+  // 1. Tear down Bluedroid host stack.
+  scanning_.store(false);
+  scan_params_set_.store(false);
+  bt_stack_up_.store(false);
+
+  esp_err_t err = esp_bluedroid_disable();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_bluedroid_disable: %s", esp_err_to_name(err));
+  }
+  err = esp_bluedroid_deinit();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_bluedroid_deinit: %s", esp_err_to_name(err));
+  }
+
+  // Close the VHCI transport channel.
+  hosted_hci_bluedroid_close();
+
+  // 2. Disable and deinit the C6's BT controller via RPC over SDIO.
+  //    mem_release=false so the controller can be re-inited.
+  err = esp_hosted_bt_controller_disable();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_hosted_bt_controller_disable: %s",
+             esp_err_to_name(err));
+  }
+  err = esp_hosted_bt_controller_deinit(false);
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_hosted_bt_controller_deinit: %s",
+             esp_err_to_name(err));
+  }
+
+  // Brief pause to let the C6 settle.
+  vTaskDelay(pdMS_TO_TICKS(200));
+
+  // 3. Re-init the C6 BT controller.
+  err = esp_hosted_bt_controller_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_hosted_bt_controller_init: %s",
+             esp_err_to_name(err));
+    return false;
+  }
+  err = esp_hosted_bt_controller_enable();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_hosted_bt_controller_enable: %s",
+             esp_err_to_name(err));
+    return false;
+  }
+
+  // 4. Re-open VHCI transport and bring Bluedroid back up.
+  hosted_hci_bluedroid_open();
+
+  static const esp_bluedroid_hci_driver_operations_t kHostedHciOps = {
+      .send = hosted_hci_bluedroid_send,
+      .check_send_available = hosted_hci_bluedroid_check_send_available,
+      .register_host_callback = hosted_hci_bluedroid_register_host_callback,
+  };
+  err = esp_bluedroid_attach_hci_driver(&kHostedHciOps);
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_bluedroid_attach_hci_driver: %s",
+             esp_err_to_name(err));
+    return false;
+  }
+
+  err = esp_bluedroid_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_bluedroid_init: %s", esp_err_to_name(err));
+    return false;
+  }
+  err = esp_bluedroid_enable();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_bluedroid_enable: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  err = esp_ble_gap_register_callback(
+      &EspHostedBluedroidBLE::gap_event_trampoline);
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_ble_gap_register_callback: %s",
+             esp_err_to_name(err));
+    return false;
+  }
+
+  bt_stack_up_.store(true);
+  ESP_LOGI(kTag, "BT controller reset complete — stack ready for scan");
   return true;
 }
 

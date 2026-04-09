@@ -90,6 +90,20 @@ class BLEProvisioner : public ValueProducer<BLEAdvertisement> {
    * or the transport between them — not with scan parameters.
    */
   virtual uint32_t scan_hit_count() const = 0;
+
+  /**
+   * @brief Reset the BT controller and reinitialise the host stack.
+   *
+   * This is a heavy recovery operation for when the remote BT
+   * controller (e.g. ESP32-C6 over esp_hosted SDIO) has stalled and
+   * a simple scan stop/start doesn't recover it. The default
+   * implementation is a no-op; concrete provisioners that support
+   * controller reset should override this.
+   *
+   * @return true if the controller was successfully reset and the
+   *         stack is ready for start_scan() again.
+   */
+  virtual bool reset_bt_controller() { return false; }
 };
 
 }  // namespace sensesp

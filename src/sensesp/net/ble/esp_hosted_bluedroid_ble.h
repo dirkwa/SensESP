@@ -73,17 +73,19 @@ struct EspHostedBluedroidBLEConfig {
   bool active_scan = true;
 
   /// Scan interval in milliseconds. The controller schedules a scan
-  /// window once per interval. ESPHome's known-working P4 config
-  /// uses 320 ms (512 BLE units); we default to the same value.
-  /// A conservative duty cycle avoids overwhelming the SDIO HCI
-  /// transport between the P4 host and C6 controller.
+  /// window once per interval. ESPHome's known-working P4+C6
+  /// bluetooth_proxy uses 320ms (512 BLE units). Higher duty cycles
+  /// (window closer to interval) can overwhelm the C6's SDIO HCI
+  /// transport and cause scan stalls. The BLESignalKGateway's scan
+  /// watchdog handles stalls by restarting, but a conservative duty
+  /// cycle minimises how often restarts are needed.
   uint32_t scan_interval_ms = 320;
 
   /// Scan window in milliseconds. Each interval, the scanner
-  /// listens for this many ms. ESPHome uses 30 ms (48 BLE units),
+  /// listens for this many ms. ESPHome uses 30ms (48 BLE units),
   /// giving ~9% duty cycle. This is enough to discover most
-  /// advertisers within a few seconds while leaving headroom for
-  /// the C6's HCI transport buffers.
+  /// advertisers within a few seconds while keeping SDIO HCI
+  /// traffic manageable for the C6.
   uint32_t scan_window_ms = 30;
 };
 
@@ -124,6 +126,7 @@ class EspHostedBluedroidBLE : public BLEProvisioner {
   bool is_scanning() const override;
   String mac_address() const override;
   uint32_t scan_hit_count() const override { return scan_hit_count_; }
+  bool reset_bt_controller() override;
 
  private:
   // Called from the static GAP trampoline on behalf of this instance.

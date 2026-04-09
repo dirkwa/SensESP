@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp/signalk/signalk_ws_client.h"
+#include "sensesp_app.h"
 
 namespace sensesp {
 
@@ -248,6 +249,16 @@ void BLESignalKGateway::send_hello() {
   doc["mac"] = ble_provisioner_ ? ble_provisioner_->mac_address() : String("");
   doc["hostname"] = SensESPBaseApp::get_hostname();
 
+  // IP address from the network provisioner so the server can show
+  // it in the BLE manager UI.
+  auto app = SensESPApp::get();
+  if (app) {
+    auto provisioner = app->get_network_provisioner();
+    if (provisioner) {
+      doc["ip_address"] = provisioner->local_ip().toString();
+    }
+  }
+
   String msg;
   serializeJson(doc, msg);
   esp_websocket_client_send_text(control_ws_, msg.c_str(), msg.length(),
@@ -390,11 +401,68 @@ void BLESignalKGateway::post_task_entry(void* arg) {
 
 void BLESignalKGateway::post_task_loop() {
   unsigned long last_status_ms = 0;
+  uint32_t last_known_hits = 0;
+  unsigned long last_hit_change_ms = millis();
+  static constexpr unsigned long kScanWatchdogMs = 30000;
+  static constexpr int kMaxRestartsBeforeReboot = 5;
+  int consecutive_restarts = 0;
+
   while (post_task_should_run_.load()) {
     vTaskDelay(pdMS_TO_TICKS(config_.post_interval_ms));
     post_pending_advertisements();
 
     unsigned long now = millis();
+
+    // Scan watchdog: if no new advertisements have arrived in
+    // kScanWatchdogMs, try escalating recovery:
+    //   1st: scan stop/start (HCI level)
+    //   2nd: full BT controller reset (RPC to C6)
+    //   3rd+: keep alternating controller resets
+    if (ble_provisioner_) {
+      uint32_t current_hits = ble_provisioner_->scan_hit_count();
+      if (current_hits != last_known_hits) {
+        last_known_hits = current_hits;
+        last_hit_change_ms = now;
+        consecutive_restarts = 0;
+      } else if (now - last_hit_change_ms > kScanWatchdogMs &&
+                 ble_provisioner_->is_scanning()) {
+        consecutive_restarts++;
+        if (consecutive_restarts == 1) {
+          // Level 1: simple scan restart (HCI level).
+          ESP_LOGW(kTag,
+                   "Scan watchdog: no hits in %lu ms — restarting scan",
+                   now - last_hit_change_ms);
+          ble_provisioner_->stop_scan();
+          vTaskDelay(pdMS_TO_TICKS(500));
+          ble_provisioner_->start_scan();
+        } else if (consecutive_restarts <= kMaxRestartsBeforeReboot) {
+          // Level 2: full BT controller reset via RPC to C6.
+          ESP_LOGW(kTag,
+                   "Scan watchdog: restart #%d failed — resetting BT "
+                   "controller",
+                   consecutive_restarts);
+          ble_provisioner_->stop_scan();
+          vTaskDelay(pdMS_TO_TICKS(200));
+          if (ble_provisioner_->reset_bt_controller()) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            ble_provisioner_->start_scan();
+          } else {
+            ESP_LOGE(kTag, "BT controller reset failed");
+          }
+        } else {
+          // Level 3: reboot the device. The C6 is in a state that
+          // no software recovery can fix. A fresh boot may land in
+          // a working state. This matches ESPHome's approach.
+          ESP_LOGE(kTag,
+                   "Scan watchdog: %d consecutive failures — rebooting",
+                   consecutive_restarts);
+          vTaskDelay(pdMS_TO_TICKS(1000));
+          ESP.restart();
+        }
+        last_hit_change_ms = now;
+      }
+    }
+
     if (now - last_status_ms >= config_.status_interval_ms) {
       send_status();
       last_status_ms = now;
