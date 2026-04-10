@@ -46,7 +46,8 @@ struct BLESignalKGatewayConfig {
   size_t max_pending_ads = 500;
 
   /// Gateway firmware version string sent in the hello message.
-  String firmware_version = "3.0.0";
+  /// Empty string means use the SensESP library version.
+  String firmware_version = "";
 
   /// Max GATT sessions advertised in the hello message. Currently
   /// always 0 because GATT support is not implemented yet — the

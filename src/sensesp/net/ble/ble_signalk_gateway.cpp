@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 
 #include "esp_log.h"
+#include "sensesp/sensesp_version.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp/signalk/signalk_ws_client.h"
 #include "sensesp_app.h"
@@ -214,9 +215,6 @@ void BLESignalKGateway::init_control_ws() {
   cfg.buffer_size = 1024;
   cfg.reconnect_timeout_ms = 5000;
   cfg.network_timeout_ms = 10000;
-  // Client-side keepalive: send a ping every 10s. If no pong comes
-  // back, the client detects the dead connection and reconnects.
-  cfg.pingpong_timeout_sec = 10;
 
   control_ws_ = esp_websocket_client_init(&cfg);
   if (control_ws_ == nullptr) {
@@ -253,7 +251,9 @@ void BLESignalKGateway::send_hello() {
   JsonDocument doc;
   doc["type"] = "hello";
   doc["gateway_id"] = SensESPBaseApp::get_hostname();
-  doc["firmware"] = config_.firmware_version;
+  doc["firmware"] = config_.firmware_version.length() > 0
+                        ? config_.firmware_version
+                        : String(kSensESPVersion);
   doc["max_gatt_connections"] =
       ble_provisioner_ ? ble_provisioner_->max_gatt_connections()
                        : config_.max_gatt_sessions;
