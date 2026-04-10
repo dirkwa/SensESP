@@ -168,7 +168,12 @@ class SensESPBaseApp {
     if (!hostname_) {
       init_hostname();
     }
-    hostname_->set(hostname);
+    // Only apply the compile-time default if the user has not
+    // configured a hostname via the web UI (i.e. no persisted value
+    // exists, so the hostname still equals the factory default).
+    if (hostname_->get() == kDefaultHostname) {
+      hostname_->set(hostname);
+    }
     return this;
   }
 };
