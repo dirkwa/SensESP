@@ -5,6 +5,7 @@
 
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "esp_bluedroid_hci.h"
 #include "esp_bt_device.h"
 #include "esp_log.h"
@@ -102,52 +103,21 @@ EspHostedBluedroidBLE::EspHostedBluedroidBLE(
   }
   instance_ = this;
 
+  if (config_.enable_hci_logging) {
+    esp_log_level_set("BT_HCI", ESP_LOG_VERBOSE);
+    esp_log_level_set("vhci_drv", ESP_LOG_VERBOSE);
+    esp_log_level_set("transport", ESP_LOG_VERBOSE);
+    esp_log_level_set("H_BT", ESP_LOG_VERBOSE);
+    ESP_LOGW(kTag, "HCI verbose logging enabled — expect heavy output");
+  }
+
   ESP_LOGI(kTag, "Initialising ESP-Hosted BT controller");
   if (!hostedInitBLE()) {
     ESP_LOGE(kTag, "hostedInitBLE() failed — C6 slave not responding?");
     return;
   }
 
-  ESP_LOGI(kTag, "Opening hosted HCI VHCI transport");
-  hosted_hci_bluedroid_open();
-
-  // Register the esp_hosted VHCI driver with Bluedroid. This is the
-  // step Arduino-ESP32's hostedInitBLE() helper intentionally omits
-  // (because it was written for NimBLE, which attaches to the HCI
-  // transport automatically). Without this registration
-  // esp_bluedroid_enable() below would post its enable command to
-  // the BTC task and then block forever on future_await() because
-  // no HCI responses would come back from the controller.
-  static const esp_bluedroid_hci_driver_operations_t kHostedHciOps = {
-      .send = hosted_hci_bluedroid_send,
-      .check_send_available = hosted_hci_bluedroid_check_send_available,
-      .register_host_callback = hosted_hci_bluedroid_register_host_callback,
-  };
-
-  esp_err_t err = esp_bluedroid_attach_hci_driver(&kHostedHciOps);
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_bluedroid_attach_hci_driver failed: %s",
-             esp_err_to_name(err));
-    return;
-  }
-
-  ESP_LOGI(kTag, "Initialising Bluedroid host stack");
-  err = esp_bluedroid_init();
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_bluedroid_init failed: %s", esp_err_to_name(err));
-    return;
-  }
-
-  err = esp_bluedroid_enable();
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_bluedroid_enable failed: %s", esp_err_to_name(err));
-    return;
-  }
-
-  err = esp_ble_gap_register_callback(&EspHostedBluedroidBLE::gap_event_trampoline);
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_ble_gap_register_callback failed: %s",
-             esp_err_to_name(err));
+  if (!bringup_bluedroid()) {
     return;
   }
 
@@ -229,10 +199,7 @@ bool EspHostedBluedroidBLE::stop_scan() {
   return true;
 }
 
-bool EspHostedBluedroidBLE::reset_bt_controller() {
-  ESP_LOGW(kTag, "Resetting BT controller — full Bluedroid + C6 restart");
-
-  // 1. Tear down Bluedroid host stack.
+void EspHostedBluedroidBLE::teardown_bluedroid() {
   scanning_.store(false);
   scan_params_set_.store(false);
   bt_stack_up_.store(false);
@@ -245,13 +212,62 @@ bool EspHostedBluedroidBLE::reset_bt_controller() {
   if (err != ESP_OK) {
     ESP_LOGE(kTag, "esp_bluedroid_deinit: %s", esp_err_to_name(err));
   }
-
-  // Close the VHCI transport channel.
   hosted_hci_bluedroid_close();
+}
 
-  // 2. Disable and deinit the C6's BT controller via RPC over SDIO.
-  //    mem_release=false so the controller can be re-inited.
-  err = esp_hosted_bt_controller_disable();
+bool EspHostedBluedroidBLE::bringup_bluedroid() {
+  ESP_LOGI(kTag, "Opening hosted HCI VHCI transport");
+  hosted_hci_bluedroid_open();
+
+  static const esp_bluedroid_hci_driver_operations_t kHostedHciOps = {
+      .send = hosted_hci_bluedroid_send,
+      .check_send_available = hosted_hci_bluedroid_check_send_available,
+      .register_host_callback = hosted_hci_bluedroid_register_host_callback,
+  };
+  esp_err_t err = esp_bluedroid_attach_hci_driver(&kHostedHciOps);
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_bluedroid_attach_hci_driver: %s",
+             esp_err_to_name(err));
+    return false;
+  }
+
+  ESP_LOGI(kTag, "Initialising Bluedroid host stack");
+  err = esp_bluedroid_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_bluedroid_init: %s", esp_err_to_name(err));
+    return false;
+  }
+  err = esp_bluedroid_enable();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_bluedroid_enable: %s", esp_err_to_name(err));
+    return false;
+  }
+  err = esp_ble_gap_register_callback(
+      &EspHostedBluedroidBLE::gap_event_trampoline);
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_ble_gap_register_callback: %s",
+             esp_err_to_name(err));
+    return false;
+  }
+
+#ifdef CONFIG_BT_GATTC_ENABLE
+  if (!gattc_.init(&EspHostedBluedroidBLE::gattc_event_trampoline)) {
+    ESP_LOGW(kTag, "GATTC init failed — GATT client will not be available");
+    // Non-fatal: scanning still works without GATTC.
+  }
+#endif
+
+  return true;
+}
+
+bool EspHostedBluedroidBLE::reset_bt_controller() {
+  ESP_LOGW(kTag, "Resetting BT controller via RPC — Bluedroid + C6 BT restart");
+
+  teardown_bluedroid();
+
+  // Disable and deinit the C6's BT controller via RPC over SDIO.
+  // mem_release=false so the controller can be re-inited.
+  esp_err_t err = esp_hosted_bt_controller_disable();
   if (err != ESP_OK) {
     ESP_LOGE(kTag, "esp_hosted_bt_controller_disable: %s",
              esp_err_to_name(err));
@@ -262,10 +278,9 @@ bool EspHostedBluedroidBLE::reset_bt_controller() {
              esp_err_to_name(err));
   }
 
-  // Brief pause to let the C6 settle.
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  // 3. Re-init the C6 BT controller.
+  // Re-init the C6 BT controller.
   err = esp_hosted_bt_controller_init();
   if (err != ESP_OK) {
     ESP_LOGE(kTag, "esp_hosted_bt_controller_init: %s",
@@ -279,42 +294,75 @@ bool EspHostedBluedroidBLE::reset_bt_controller() {
     return false;
   }
 
-  // 4. Re-open VHCI transport and bring Bluedroid back up.
-  hosted_hci_bluedroid_open();
-
-  static const esp_bluedroid_hci_driver_operations_t kHostedHciOps = {
-      .send = hosted_hci_bluedroid_send,
-      .check_send_available = hosted_hci_bluedroid_check_send_available,
-      .register_host_callback = hosted_hci_bluedroid_register_host_callback,
-  };
-  err = esp_bluedroid_attach_hci_driver(&kHostedHciOps);
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_bluedroid_attach_hci_driver: %s",
-             esp_err_to_name(err));
-    return false;
-  }
-
-  err = esp_bluedroid_init();
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_bluedroid_init: %s", esp_err_to_name(err));
-    return false;
-  }
-  err = esp_bluedroid_enable();
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_bluedroid_enable: %s", esp_err_to_name(err));
-    return false;
-  }
-
-  err = esp_ble_gap_register_callback(
-      &EspHostedBluedroidBLE::gap_event_trampoline);
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "esp_ble_gap_register_callback: %s",
-             esp_err_to_name(err));
+  if (!bringup_bluedroid()) {
     return false;
   }
 
   bt_stack_up_.store(true);
-  ESP_LOGI(kTag, "BT controller reset complete — stack ready for scan");
+  ESP_LOGI(kTag, "BT controller RPC reset complete — stack ready for scan");
+  return true;
+}
+
+bool EspHostedBluedroidBLE::hard_reset_c6() {
+  // GPIO hard-reset of the C6 companion chip. This is the nuclear
+  // option: it power-cycles the entire C6, killing both its BLE and
+  // WiFi stacks. On the Waveshare P4-POE board the C6 reset line is
+  // GPIO 54 (CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE). The esp_hosted
+  // SDIO transport layer has its own reconnection logic that kicks in
+  // when the C6 comes back.
+  //
+  // This is safe on Ethernet-only boards (no WiFi dependency on C6).
+  // On boards that use the C6 for WiFi this would drop the network —
+  // the caller should only use this when WiFi is not the primary link.
+
+  constexpr gpio_num_t kC6ResetPin =
+      static_cast<gpio_num_t>(CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE);
+
+  ESP_LOGW(kTag,
+           "Hard-resetting C6 via GPIO %d — full chip power cycle",
+           static_cast<int>(kC6ResetPin));
+
+  // 1. Tear down Bluedroid before yanking the transport.
+  teardown_bluedroid();
+
+  // 2. Pulse the C6 reset line. The reset is active-high on the
+  //    Waveshare board (CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y):
+  //    driving HIGH asserts reset, LOW deasserts.
+  gpio_set_direction(kC6ResetPin, GPIO_MODE_OUTPUT);
+  // Assert reset (HIGH = C6 held in reset).
+  gpio_set_level(kC6ResetPin, 1);
+  vTaskDelay(pdMS_TO_TICKS(100));
+  // Deassert reset (LOW = C6 starts booting).
+  gpio_set_level(kC6ResetPin, 0);
+
+  // 3. Wait for the C6 to boot its slave firmware. The esp_hosted
+  //    SDIO transport uses a 1500ms timeout for card init after reset.
+  //    Give a bit more headroom.
+  ESP_LOGI(kTag, "Waiting 2000ms for C6 to boot...");
+  vTaskDelay(pdMS_TO_TICKS(2000));
+
+  // 4. Re-init the C6 BT controller via RPC. The SDIO transport
+  //    should have reconnected by now.
+  esp_err_t err = esp_hosted_bt_controller_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_hosted_bt_controller_init after GPIO reset: %s",
+             esp_err_to_name(err));
+    return false;
+  }
+  err = esp_hosted_bt_controller_enable();
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_hosted_bt_controller_enable after GPIO reset: %s",
+             esp_err_to_name(err));
+    return false;
+  }
+
+  // 5. Bring Bluedroid back up on top of the fresh C6.
+  if (!bringup_bluedroid()) {
+    return false;
+  }
+
+  bt_stack_up_.store(true);
+  ESP_LOGI(kTag, "C6 GPIO hard-reset complete — stack ready for scan");
   return true;
 }
 
@@ -343,6 +391,8 @@ void EspHostedBluedroidBLE::handle_gap_event(
     esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
   switch (event) {
     case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT: {
+      ESP_LOGI(kTag, "SCAN_PARAM_SET_COMPLETE status=%d",
+               param->scan_param_cmpl.status);
       if (param->scan_param_cmpl.status != ESP_BT_STATUS_SUCCESS) {
         ESP_LOGE(kTag, "SCAN_PARAM_SET failed, status=%d",
                  param->scan_param_cmpl.status);
@@ -358,6 +408,8 @@ void EspHostedBluedroidBLE::handle_gap_event(
       break;
     }
     case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT: {
+      ESP_LOGI(kTag, "SCAN_START_COMPLETE status=%d",
+               param->scan_start_cmpl.status);
       if (param->scan_start_cmpl.status != ESP_BT_STATUS_SUCCESS) {
         ESP_LOGE(kTag, "SCAN_START failed, status=%d",
                  param->scan_start_cmpl.status);
@@ -394,10 +446,20 @@ void EspHostedBluedroidBLE::handle_gap_event(
       break;
     }
     default:
-      ESP_LOGD(kTag, "Unhandled GAP event %d", static_cast<int>(event));
+      ESP_LOGD(kTag, "GAP event %d", static_cast<int>(event));
       break;
   }
 }
+
+#ifdef CONFIG_BT_GATTC_ENABLE
+void EspHostedBluedroidBLE::gattc_event_trampoline(
+    esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
+    esp_ble_gattc_cb_param_t* param) {
+  if (instance_) {
+    instance_->gattc_.handle_gattc_event(event, gattc_if, param);
+  }
+}
+#endif
 
 }  // namespace sensesp
 

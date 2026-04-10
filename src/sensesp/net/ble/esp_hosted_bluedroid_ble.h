@@ -31,6 +31,7 @@
 #include "esp_gap_ble_api.h"
 
 #include "sensesp/net/ble/ble_provisioner.h"
+#include "sensesp/net/ble/bluedroid_gattc.h"
 
 namespace sensesp {
 
@@ -74,20 +75,23 @@ struct EspHostedBluedroidBLEConfig {
   bool active_scan = false;
 
   /// Scan interval in milliseconds. The controller schedules a scan
-  /// window once per interval. ESPHome's known-working P4+C6
-  /// bluetooth_proxy uses 320ms (512 BLE units). Higher duty cycles
-  /// (window closer to interval) can overwhelm the C6's SDIO HCI
-  /// transport and cause scan stalls. The BLESignalKGateway's scan
-  /// watchdog handles stalls by restarting, but a conservative duty
-  /// cycle minimises how often restarts are needed.
+  /// window once per interval. Lower duty cycles (small window
+  /// relative to interval) reduce SDIO HCI traffic and greatly
+  /// delay the onset of the C6 scan stall (esp-hosted-mcu#180).
+  /// At 320/30 (~9% duty) the scanner still discovers most
+  /// advertisers within a few seconds and the stall typically
+  /// doesn't trigger for many minutes vs seconds at 50%.
   uint32_t scan_interval_ms = 320;
 
   /// Scan window in milliseconds. Each interval, the scanner
-  /// listens for this many ms. At 160ms window / 320ms interval
-  /// (~50% duty cycle) the passive scanner discovers most
-  /// advertisers within seconds while keeping SDIO HCI traffic
-  /// manageable for the C6.
+  /// listens for this many ms. 160ms at 320ms interval is ~50% duty.
   uint32_t scan_window_ms = 160;
+
+  /// Enable verbose HCI/VHCI logging at init time. Useful for
+  /// diagnosing whether the C6 is sending LE Advertising Reports
+  /// at all. Generates a LOT of output — only enable when chasing
+  /// scan stalls.
+  bool enable_hci_logging = false;
 };
 
 /**
@@ -128,8 +132,47 @@ class EspHostedBluedroidBLE : public BLEProvisioner {
   String mac_address() const override;
   uint32_t scan_hit_count() const override { return scan_hit_count_; }
   bool reset_bt_controller() override;
+  bool hard_reset_c6();
+
+  // -- GATT client --
+#ifdef CONFIG_BT_GATTC_ENABLE
+  int max_gatt_connections() const override {
+    return gattc_.max_gatt_connections();
+  }
+  int active_gatt_connections() const override {
+    return gattc_.active_gatt_connections();
+  }
+  int gatt_connect(const String& mac, uint8_t addr_type,
+                   const String& service_uuid,
+                   GATTConnectionCallbacks callbacks) override {
+    return gattc_.gatt_connect(mac, addr_type, service_uuid,
+                               std::move(callbacks));
+  }
+  bool gatt_subscribe_notify(int conn_handle,
+                             const String& char_uuid) override {
+    return gattc_.gatt_subscribe_notify(conn_handle, char_uuid);
+  }
+  bool gatt_read(int conn_handle, const String& char_uuid) override {
+    return gattc_.gatt_read(conn_handle, char_uuid);
+  }
+  bool gatt_write(int conn_handle, const String& char_uuid,
+                  const uint8_t* data, size_t len) override {
+    return gattc_.gatt_write(conn_handle, char_uuid, data, len);
+  }
+  void gatt_disconnect(int conn_handle) override {
+    gattc_.gatt_disconnect(conn_handle);
+  }
+#endif
 
  private:
+  // Tear down Bluedroid host stack + VHCI. Shared by
+  // reset_bt_controller() and hard_reset_c6().
+  void teardown_bluedroid();
+
+  // Bring up Bluedroid host stack + VHCI after the C6's BT controller
+  // is already running. Shared by the constructor tail, reset paths.
+  bool bringup_bluedroid();
+
   // Called from the static GAP trampoline on behalf of this instance.
   void handle_gap_event(esp_gap_ble_cb_event_t event,
                         esp_ble_gap_cb_param_t* param);
@@ -152,6 +195,13 @@ class EspHostedBluedroidBLE : public BLEProvisioner {
   // Cached scan parameters struct — must outlive the scan since
   // Bluedroid stores a reference during active scanning.
   esp_ble_scan_params_t scan_params_{};
+
+#ifdef CONFIG_BT_GATTC_ENABLE
+  BluedroidGATTC gattc_;
+  static void gattc_event_trampoline(esp_gattc_cb_event_t event,
+                                     esp_gatt_if_t gattc_if,
+                                     esp_ble_gattc_cb_param_t* param);
+#endif
 };
 
 }  // namespace sensesp

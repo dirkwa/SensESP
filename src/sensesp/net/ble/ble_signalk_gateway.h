@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 
 #include <atomic>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -12,6 +13,8 @@
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+
+#include "sensesp/net/ble/gatt_session.h"
 
 #include "sensesp/net/ble/ble_advertisement.h"
 #include "sensesp/net/ble/ble_provisioner.h"
@@ -164,6 +167,24 @@ class BLESignalKGateway {
   // Dispatch an incoming control WS message.
   void handle_control_ws_message(uint8_t* payload, size_t length);
 
+  // GATT command handlers.
+  void handle_gatt_subscribe(JsonDocument& doc);
+  void handle_gatt_write(JsonDocument& doc);
+  void handle_gatt_close(JsonDocument& doc);
+
+  // Send a JSON message on the control WS (thread-safe).
+  void send_control_json(JsonDocument& doc);
+
+  // GATT session state machine progression.
+  void gatt_run_init_writes(GATTSession* session);
+  void gatt_run_subscribes(GATTSession* session);
+  void gatt_start_timers(GATTSession* session);
+  void gatt_cleanup_session(const String& session_id);
+
+  // FreeRTOS timer callbacks for poll and periodic write.
+  static void poll_timer_cb(TimerHandle_t timer);
+  static void periodic_write_timer_cb(TimerHandle_t timer);
+
   // Drain pending_ads_ and POST them to signalk-server.
   void post_pending_advertisements();
 
@@ -200,6 +221,12 @@ class BLESignalKGateway {
   // Background POST task handle.
   TaskHandle_t post_task_ = nullptr;
   std::atomic<bool> post_task_should_run_{false};
+
+  // Active GATT sessions keyed by session_id.
+  std::map<String, std::unique_ptr<GATTSession>> gatt_sessions_;
+  SemaphoreHandle_t gatt_sessions_mutex_ = nullptr;
+  // Suppress scan watchdog while GATT connections are being established.
+  std::atomic<bool> scan_suppressed_{false};
 
   // Counters.
   std::atomic<uint32_t> adv_received_count_{0};

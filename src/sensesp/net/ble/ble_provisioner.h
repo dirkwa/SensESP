@@ -3,13 +3,36 @@
 
 #include <Arduino.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include "sensesp/net/ble/ble_advertisement.h"
 #include "sensesp/system/valueproducer.h"
 
 namespace sensesp {
+
+/// Callbacks delivered by the BLE provisioner for an active GATT
+/// connection. All callbacks fire from the BT stack task — they must
+/// not block. The provisioner owns the callback lifetime for as long
+/// as the connection is open.
+struct GATTConnectionCallbacks {
+  /// Connection established and service/characteristic discovery done.
+  std::function<void()> on_connected;
+  /// Connection dropped (peer-initiated or link loss).
+  std::function<void(const String& reason)> on_disconnected;
+  /// Notification received from a characteristic.
+  std::function<void(const String& char_uuid,
+                     const uint8_t* data, size_t len)> on_notify;
+  /// Read response received.
+  std::function<void(const String& char_uuid,
+                     const uint8_t* data, size_t len)> on_read;
+  /// Write completed (success or failure).
+  std::function<void(const String& char_uuid, bool success)> on_write_complete;
+  /// Unrecoverable error during connection setup.
+  std::function<void(const String& error)> on_error;
+};
 
 /**
  * @brief Chip-agnostic BLE provisioner interface.
@@ -104,6 +127,70 @@ class BLEProvisioner : public ValueProducer<BLEAdvertisement> {
    *         stack is ready for start_scan() again.
    */
   virtual bool reset_bt_controller() { return false; }
+
+  /**
+   * @brief Hard-reset the remote co-processor via GPIO.
+   *
+   * Even more aggressive than reset_bt_controller() — this toggles the
+   * companion chip's hardware reset line, power-cycling it entirely.
+   * Use this when RPC-based resets don't recover the scan stall. The
+   * default implementation is a no-op; only provisioners that talk to
+   * a remote co-processor (e.g. EspHostedBluedroidBLE) implement this.
+   *
+   * @return true if the co-processor was successfully reset and the
+   *         BLE stack is ready for start_scan() again.
+   */
+  virtual bool hard_reset_c6() { return false; }
+
+  // -----------------------------------------------------------------
+  // GATT client interface
+  // -----------------------------------------------------------------
+
+  /// Maximum concurrent GATT connections this provisioner supports.
+  virtual int max_gatt_connections() const { return 0; }
+
+  /// Number of currently active GATT connections.
+  virtual int active_gatt_connections() const { return 0; }
+
+  /**
+   * @brief Connect to a BLE peripheral and discover a service.
+   *
+   * Initiates a GATT connection to the given MAC address. After
+   * connecting, the provisioner discovers the specified service and
+   * enumerates its characteristics. When ready, callbacks.on_connected
+   * fires. Notification/read/write operations can then be requested.
+   *
+   * @param mac       "AA:BB:CC:DD:EE:FF" format
+   * @param addr_type BLE address type (0=public, 1=random)
+   * @param service_uuid UUID of the primary service to discover
+   * @param callbacks Event callbacks for this connection
+   * @return connection handle (>= 0) on success, -1 on failure
+   */
+  virtual int gatt_connect(const String& mac, uint8_t addr_type,
+                           const String& service_uuid,
+                           GATTConnectionCallbacks callbacks) {
+    return -1;
+  }
+
+  /// Subscribe to notifications on a characteristic.
+  virtual bool gatt_subscribe_notify(int conn_handle,
+                                     const String& char_uuid) {
+    return false;
+  }
+
+  /// Read a characteristic value. Result arrives via on_read callback.
+  virtual bool gatt_read(int conn_handle, const String& char_uuid) {
+    return false;
+  }
+
+  /// Write to a characteristic. Result via on_write_complete callback.
+  virtual bool gatt_write(int conn_handle, const String& char_uuid,
+                          const uint8_t* data, size_t len) {
+    return false;
+  }
+
+  /// Disconnect a GATT connection and release resources.
+  virtual void gatt_disconnect(int conn_handle) {}
 };
 
 }  // namespace sensesp

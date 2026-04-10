@@ -173,7 +173,10 @@ void setup() {
                  ->set_sk_server("192.168.0.148", 3000)
                  ->get_app();
 
-  g_ble = std::make_shared<EspHostedBluedroidBLE>();
+  EspHostedBluedroidBLEConfig ble_cfg;
+  // Uncomment to enable verbose HCI tracing for scan stall diagnosis:
+  // ble_cfg.enable_hci_logging = true;
+  g_ble = std::make_shared<EspHostedBluedroidBLE>(ble_cfg);
 
   g_gateway =
       std::make_shared<BLESignalKGateway>(g_ble, app->get_ws_client());
