@@ -83,27 +83,17 @@ void BLESignalKGateway::start() {
   // trying to reach a dead server.
   sk_client_->connect_to(
       new LambdaConsumer<SKWSConnectionState>([this](SKWSConnectionState s) {
-        if (s == SKWSConnectionState::kSKWSConnected) {
+        bool connected = (s == SKWSConnectionState::kSKWSConnected);
+        sk_connected_.store(connected);
+        if (connected && control_ws_ == nullptr) {
           ESP_LOGI(kTag,
                    "SK main WS connected — starting BLE gateway control WS");
-          sk_connected_.store(true);
           init_control_ws();
-        } else {
-          ESP_LOGI(kTag,
-                   "SK main WS disconnected — tearing down control WS");
-          sk_connected_.store(false);
-          destroy_control_ws();
         }
       }));
 
-  // Belt-and-suspenders: if the SK WS is already connected at the
-  // moment we started (e.g. because SensESPApp::setup() has already
-  // completed the SK bring-up before our start() was called), kick
-  // the control WS manually. Otherwise we would have to wait for the
-  // next state transition.
+  // If the SK WS is already connected, start the control WS now.
   if (sk_client_->is_connected()) {
-    ESP_LOGI(kTag,
-             "SK main WS already connected at start — kicking control WS");
     sk_connected_.store(true);
     init_control_ws();
   }
