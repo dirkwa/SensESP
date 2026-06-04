@@ -349,8 +349,20 @@ void SKWSClient::on_receive_updates(JsonDocument& message) {
     JsonArray values = update["values"];
 
     for (size_t vi = 0; vi < values.size(); vi++) {
+      JsonObject vobj = values[vi];
+      // Fire the generic value callback (used by consumers that watch
+      // a wildcard family of paths — e.g. notifications.*). Fires
+      // on the WS task; consumers must marshal to event_loop for any
+      // single-threaded UI work.
+      if (value_callback_) {
+        const char* path_cstr = vobj["path"];
+        if (path_cstr) {
+          JsonVariantConst v = vobj["value"];
+          value_callback_(String(path_cstr), v);
+        }
+      }
       JsonDocument value_doc =
-          static_cast<JsonDocument>(static_cast<JsonObject>((values[vi])));
+          static_cast<JsonDocument>(static_cast<JsonObject>(vobj));
 
       // push all values into a separate list for processing
       // in the main task

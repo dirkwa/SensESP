@@ -163,6 +163,22 @@ class SKWSClient : public FileSystemSaveable,
   void on_meta(MetaCallback cb) { meta_callback_ = std::move(cb); }
 
   /**
+   * @brief Optional callback fired for every value delta arriving on
+   * the WS stream, regardless of whether any SKListener is registered
+   * for the path.
+   *
+   * Used by consumers (such as the JLP notifications registry) that
+   * need to observe a wildcard family of paths (e.g.
+   * `notifications.*`) where the set of live paths changes
+   * dynamically. The callback fires on the WS task — implementations
+   * must not block and must marshal LVGL or other single-threaded UI
+   * work onto event_loop via onDelay(0, ...).
+   */
+  using ValueCallback = std::function<void(const String& path,
+                                           const JsonVariantConst& value)>;
+  void on_value(ValueCallback cb) { value_callback_ = std::move(cb); }
+
+  /**
    * @brief Check if TOFU certificate verification is enabled.
    */
   bool is_tofu_enabled() const { return tofu_enabled_; }
@@ -235,6 +251,8 @@ class SKWSClient : public FileSystemSaveable,
 
   // Optional fan-out for incoming meta deltas. Set via on_meta().
   MetaCallback meta_callback_;
+  // Optional fan-out for every incoming value delta. Set via on_value().
+  ValueCallback value_callback_;
   String tofu_fingerprint_ = "";  // SHA256 fingerprint in hex (64 chars)
 
   TaskQueueProducer<SKWSConnectionState> connection_state_{
