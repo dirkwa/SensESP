@@ -374,7 +374,7 @@ void SKWSClient::on_receive_updates(JsonDocument& message) {
       // event_loop next. Drops are fine — older values are
       // superseded by later deltas anyway. Log at debug so the
       // per-drop trace doesn't flood the remote console.
-      constexpr size_t kMaxReceivedUpdates = 20;
+      constexpr size_t kMaxReceivedUpdates = 100;
       while (received_updates_.size() >= kMaxReceivedUpdates) {
         received_updates_.pop_front();
         ESP_LOGD(__FILENAME__,
@@ -416,7 +416,16 @@ void SKWSClient::process_received_updates() {
 
   take_received_updates_semaphore();
   int num_updates = received_updates_.size();
-  while (!received_updates_.empty()) {
+  // Cap the batch we process per call so this onRepeat doesn't hog
+  // event_loop end-to-end when SK's reconnect burst lands. With ~50
+  // ListenSomeething widgets bound to ~30 paths each, draining 100
+  // updates synchronously can take >2s and starves LVGL / HTTP
+  // handlers. 8 per tick × 1ms onRepeat = ~8000/s throughput which
+  // still beats any SK firehose, while keeping other event_loop
+  // work responsive.
+  constexpr int kMaxBatch = 8;
+  int processed = 0;
+  while (!received_updates_.empty() && processed < kMaxBatch) {
     JsonDocument& doc = received_updates_.front();
 
     const char* path = doc["path"];
@@ -436,6 +445,7 @@ void SKWSClient::process_received_updates() {
       }
     }
     received_updates_.pop_front();
+    processed++;
   }
   release_received_updates_semaphore();
   delta_rx_count_producer_.set(num_updates);
@@ -468,7 +478,7 @@ void SKWSClient::on_receive_put(JsonDocument& message) {
         take_received_updates_semaphore();
         // 20-deep, matching the value-side path above. Drops are
         // logged at debug so the trace doesn't flood the console.
-        constexpr size_t kMaxReceivedUpdates = 20;
+        constexpr size_t kMaxReceivedUpdates = 100;
         while (received_updates_.size() >= kMaxReceivedUpdates) {
           received_updates_.pop_front();
           ESP_LOGD(__FILENAME__,
