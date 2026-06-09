@@ -366,10 +366,17 @@ void SKWSClient::on_receive_updates(JsonDocument& message) {
 
       // push all values into a separate list for processing
       // in the main task
-      constexpr size_t kMaxReceivedUpdates = 20;
+      // Was 20: SK's initial-state burst on (re)connect easily blows
+      // past that, dropping hundreds of values per second. The drop
+      // itself is fine (older values would have been superseded
+      // anyway), but the per-drop log line floods the remote console
+      // and steals event_loop time on the main task that's trying
+      // to drain. Bump to 200 (covers a typical helm's full initial
+      // state in one burst) and log at debug.
+      constexpr size_t kMaxReceivedUpdates = 200;
       while (received_updates_.size() >= kMaxReceivedUpdates) {
         received_updates_.pop_front();
-        ESP_LOGW(__FILENAME__,
+        ESP_LOGD(__FILENAME__,
                  "Dropping oldest received update (queue full)");
       }
       received_updates_.push_back(value_doc);
@@ -458,10 +465,11 @@ void SKWSClient::on_receive_put(JsonDocument& message) {
       SKPutListener* listener = listeners[j];
       if (listener->get_sk_path().equals(path)) {
         take_received_updates_semaphore();
-        constexpr size_t kMaxReceivedUpdates = 20;
+        // Same bump as the value-side path above (was 20).
+        constexpr size_t kMaxReceivedUpdates = 200;
         while (received_updates_.size() >= kMaxReceivedUpdates) {
           received_updates_.pop_front();
-          ESP_LOGW(__FILENAME__,
+          ESP_LOGD(__FILENAME__,
                    "Dropping oldest received update (queue full)");
         }
         received_updates_.push_back(value);
