@@ -366,14 +366,15 @@ void SKWSClient::on_receive_updates(JsonDocument& message) {
 
       // push all values into a separate list for processing
       // in the main task
-      // Was 20: SK's initial-state burst on (re)connect easily blows
-      // past that, dropping hundreds of values per second. The drop
-      // itself is fine (older values would have been superseded
-      // anyway), but the per-drop log line floods the remote console
-      // and steals event_loop time on the main task that's trying
-      // to drain. Bump to 200 (covers a typical helm's full initial
-      // state in one burst) and log at debug.
-      constexpr size_t kMaxReceivedUpdates = 200;
+      // 20-deep is intentional: the consumer (event_loop on the main
+      // task) needs short, bounded drain cycles so other event_loop
+      // work (LVGL build/swap, HTTP handler completion) stays
+      // responsive. Letting the queue grow to absorb SK's reconnect
+      // burst would just push the latency onto whoever's waiting on
+      // event_loop next. Drops are fine — older values are
+      // superseded by later deltas anyway. Log at debug so the
+      // per-drop trace doesn't flood the remote console.
+      constexpr size_t kMaxReceivedUpdates = 20;
       while (received_updates_.size() >= kMaxReceivedUpdates) {
         received_updates_.pop_front();
         ESP_LOGD(__FILENAME__,
@@ -465,8 +466,9 @@ void SKWSClient::on_receive_put(JsonDocument& message) {
       SKPutListener* listener = listeners[j];
       if (listener->get_sk_path().equals(path)) {
         take_received_updates_semaphore();
-        // Same bump as the value-side path above (was 20).
-        constexpr size_t kMaxReceivedUpdates = 200;
+        // 20-deep, matching the value-side path above. Drops are
+        // logged at debug so the trace doesn't flood the console.
+        constexpr size_t kMaxReceivedUpdates = 20;
         while (received_updates_.size() >= kMaxReceivedUpdates) {
           received_updates_.pop_front();
           ESP_LOGD(__FILENAME__,
